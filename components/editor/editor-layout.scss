@@ -4,7 +4,7 @@
 
 .editor-layout {
   display: grid;
-  grid-template-columns: 220px 1fr 200px;
+  grid-template-columns: 280px 1fr 200px;
   grid-template-rows: 100vh;
   grid-template-areas: "sidebar center panel";
   overflow: hidden;
@@ -16,6 +16,7 @@
 
   &__sidebar {
     grid-area: sidebar;
+    min-width: 280px;
     overflow: hidden;
   }
 
