@@ -18,6 +18,13 @@ import {
   SidebarSection,
   SidebarSpacer,
 } from '@/components/ui/catalyst/sidebar'
+
+
+ 
+
+
+
+
 import {
   ArrowRightStartOnRectangleIcon,
   ChevronDownIcon,
@@ -27,6 +34,8 @@ import {
   PlusIcon,
   ShieldCheckIcon,
   UserIcon,
+  DocumentIcon
+ 
 } from '@heroicons/react/16/solid'
 import {
   Cog6ToothIcon,
@@ -38,6 +47,8 @@ import {
   SparklesIcon,
   Square2StackIcon,
   TicketIcon,
+  PencilIcon,
+  
 } from '@heroicons/react/20/solid'
 
 interface LeftPanelProps {
@@ -59,7 +70,7 @@ export default function LeftPanel({
         <Dropdown>
           <DropdownButton as={SidebarItem} className="lg:mb-2.5">
             <Avatar src="/tailwind-logo.svg" />
-            <SidebarLabel>Tailwind Labs</SidebarLabel>
+            <SidebarLabel>Firestarter</SidebarLabel>
             <ChevronDownIcon />
           </DropdownButton>
           <DropdownMenu className="min-w-80 lg:min-w-64" anchor="bottom start">
@@ -99,12 +110,12 @@ export default function LeftPanel({
         </SidebarSection>
         <SidebarSection className="max-lg:hidden">
           <SidebarItem href="/search">
-            <MagnifyingGlassIcon />
-            <SidebarLabel>Search</SidebarLabel>
+            <DocumentIcon />
+            <SidebarLabel>Templates</SidebarLabel>
           </SidebarItem>
           <SidebarItem href="/inbox">
-            <InboxIcon />
-            <SidebarLabel>Inbox</SidebarLabel>
+            <PencilIcon />
+            <SidebarLabel>Created by me</SidebarLabel>
           </SidebarItem>
         </SidebarSection>
       </SidebarHeader>
@@ -156,9 +167,9 @@ export default function LeftPanel({
             <span className="flex min-w-0 items-center gap-3">
               <Avatar src="/profile-photo.jpg" className="size-10" square alt="" />
               <span className="min-w-0">
-                <span className="block truncate text-sm/5 font-medium text-zinc-950 dark:text-white">Erica</span>
+                <span className="block truncate text-sm/5 font-medium text-zinc-950 dark:text-white">Alan</span>
                 <span className="block truncate text-xs/5 font-normal text-zinc-500 dark:text-zinc-400">
-                  erica@example.com
+                  alan@aixplain.com
                 </span>
               </span>
             </span>
