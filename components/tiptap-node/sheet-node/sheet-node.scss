@@ -1,0 +1,117 @@
+.tiptap.ProseMirror {
+  --sheet-bg: #ffffff;
+  --sheet-border: var(--tt-gray-light-a-200);
+  --sheet-shadow: 0 2px 8px rgba(0, 0, 0, 0.08), 0 0 0 1px var(--sheet-border);
+  --sheet-overflow-indicator: rgba(220, 38, 38, 0.15);
+  --sheet-counter-color: var(--tt-gray-light-a-400);
+
+  .dark & {
+    --sheet-bg: var(--tt-gray-dark-100);
+    --sheet-border: var(--tt-gray-dark-a-200);
+    --sheet-shadow: 0 2px 8px rgba(0, 0, 0, 0.3), 0 0 0 1px var(--sheet-border);
+    --sheet-overflow-indicator: rgba(239, 68, 68, 0.12);
+    --sheet-counter-color: var(--tt-gray-dark-a-400);
+  }
+}
+
+/* =====================
+   SHEET WRAPPER
+   ===================== */
+.tiptap.ProseMirror {
+  /* Give the editor a page-layout background */
+  background: var(--tt-gray-light-100, #f4f4f5);
+  padding: 2rem 0;
+
+  .dark & {
+    background: var(--tt-gray-dark-50, #191919);
+  }
+
+  .sheet-node {
+    position: relative;
+    width: var(--sheet-width, 794px);
+    height: var(--sheet-height, 1122px);
+    margin: 0 auto 2rem;
+    padding: 72px 80px;
+    background: var(--sheet-bg);
+    box-shadow: var(--sheet-shadow);
+    border-radius: 2px;
+    box-sizing: border-box;
+
+    /* Clip content at sheet boundary — overflow is visible as a red tint
+       so the writer sees when a sheet is too full. */
+    overflow: hidden;
+
+    /* Visual overflow indicator — a faint red blush at the bottom when
+       content would exceed the sheet height. Purely decorative; ProseMirror
+       still renders all content. */
+    &::after {
+      content: "";
+      position: absolute;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      height: 48px;
+      background: linear-gradient(
+        to bottom,
+        transparent,
+        var(--sheet-overflow-indicator)
+      );
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity 0.2s ease;
+    }
+
+    /* Sheet number badge — top-right corner, outside the sheet */
+    &::before {
+      content: "Sheet " attr(data-index);
+      position: absolute;
+      top: -1.5rem;
+      right: 0;
+      font-size: 0.7rem;
+      color: var(--sheet-counter-color);
+      font-family: inherit;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      user-select: none;
+      pointer-events: none;
+    }
+
+    /* First sheet doesn't need a top label */
+    &[data-index="0"]::before {
+      display: none;
+    }
+  }
+
+  /* Show overflow indicator when the sheet has a data-overflow attribute
+     (set by the overflow detection hook) */
+  .sheet-node[data-overflow="true"] {
+    &::after {
+      opacity: 1;
+    }
+  }
+}
+
+/* =====================
+   PRINT
+   ===================== */
+@media print {
+  .tiptap.ProseMirror {
+    background: none;
+    padding: 0;
+
+    .sheet-node {
+      width: 210mm;
+      height: 297mm;
+      margin: 0;
+      padding: 20mm 20mm;
+      box-shadow: none;
+      page-break-after: always;
+      break-after: page;
+
+      &::before,
+      &::after {
+        display: none;
+      }
+    }
+  }
+}
