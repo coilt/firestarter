@@ -24,15 +24,14 @@ export interface SheetOptions {
 declare module "@tiptap/core" {
   interface Commands<ReturnType> {
     sheet: {
-      /**
-       * Append a new empty sheet at the end of the document.
-       */
+      /** Append a new empty sheet at the end of the document. */
       addSheet: (attrs?: Partial<SheetAttrs>) => ReturnType
 
-      /**
-       * Remove the sheet that contains the current selection.
-       */
+      /** Remove the sheet that contains the current selection. */
       removeCurrentSheet: () => ReturnType
+
+      /** Update the layoutId of the sheet with the given index. */
+      setSheetLayout: (index: number, layoutId: string) => ReturnType
     }
   }
 }
@@ -107,10 +106,12 @@ export const Sheet = Node.create<SheetOptions>({
         ({ state, dispatch }) => {
           const { tr, doc } = state
 
-          // Count existing sheets to auto-assign the next index
-          let sheetCount = 0
+          // Use max existing index + 1 so removing + re-adding never collides
+          let maxIndex = -1
           doc.forEach((node) => {
-            if (node.type.name === "sheet") sheetCount++
+            if (node.type.name === "sheet") {
+              maxIndex = Math.max(maxIndex, node.attrs.index ?? 0)
+            }
           })
 
           const sheetType = state.schema.nodes.sheet
@@ -119,7 +120,7 @@ export const Sheet = Node.create<SheetOptions>({
           if (!sheetType || !paragraphType) return false
 
           const newSheet = sheetType.create(
-            { index: sheetCount, layoutId: "single-column", ...attrs },
+            { index: maxIndex + 1, layoutId: "single-column", ...attrs },
             [paragraphType.create()]
           )
 
@@ -167,6 +168,25 @@ export const Sheet = Node.create<SheetOptions>({
           }
 
           return true
+        },
+
+      setSheetLayout:
+        (index: number, layoutId: string) =>
+        ({ state, dispatch }) => {
+          const { tr, doc } = state
+          let found = false
+
+          doc.forEach((node, offset) => {
+            if (node.type.name === "sheet" && node.attrs.index === index) {
+              if (dispatch) {
+                tr.setNodeMarkup(offset, undefined, { ...node.attrs, layoutId })
+              }
+              found = true
+            }
+          })
+
+          if (dispatch && found) dispatch(tr)
+          return found
         },
     }
   },

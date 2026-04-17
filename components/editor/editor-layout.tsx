@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { useRouter } from "next/navigation"
 
-import LeftPanel from "../ui/catalyst/left-panel"
+import ContextPanel from "../ui/catalyst/context-panel"
 
 import { SheetEditor, type SheetSummary, type EditorCommands } from "@/components/editor/sheet-editor"
 import type { Content } from "@tiptap/core"
@@ -27,24 +27,18 @@ interface InitialDoc {
 function DocSidebar({
   title,
   onTitleChange,
-  sheetCount,
-  layoutId,
   onSave,
   saveState,
 }: {
   title: string
   onTitleChange: (v: string) => void
-  sheetCount: number
-  layoutId: string
   onSave: () => void
   saveState: SaveState
 }) {
   return (
-    <LeftPanel
+    <ContextPanel
       title={title}
       onTitleChange={onTitleChange}
-      sheetCount={sheetCount}
-      layoutId={layoutId}
       onSave={onSave}
       saveState={saveState}
     />
@@ -159,8 +153,13 @@ export function EditorLayout({ initialDoc }: { initialDoc?: InitialDoc } = {}) {
     editorCommandsRef.current?.removeCurrentSheet()
   }, [])
 
-  const activeLayoutId =
-    sheets.find((s) => s.index === activeIndex)?.layoutId ?? "single-column"
+  const handleInsertBlock = useCallback((comp: { id: string; name: string; path: string; fullPath: string; slots: string[] }) => {
+    editorCommandsRef.current?.insertTemplateBlock({
+      componentId: comp.id,
+      componentPath: comp.fullPath,
+      componentName: comp.name,
+    })
+  }, [])
 
   return (
     <div className="editor-layout">
@@ -169,8 +168,6 @@ export function EditorLayout({ initialDoc }: { initialDoc?: InitialDoc } = {}) {
         <DocSidebar
           title={title}
           onTitleChange={setTitle}
-          sheetCount={sheets.length}
-          layoutId={activeLayoutId}
           onSave={handleSave}
           saveState={saveState}
         />
@@ -197,6 +194,7 @@ export function EditorLayout({ initialDoc }: { initialDoc?: InitialDoc } = {}) {
           onAddSheet={handleAddSheet}
           onRemoveSheet={handleRemoveSheet}
           canRemove={sheets.length > 1}
+          onInsertBlock={handleInsertBlock}
         />
       </div>
     </div>

@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/db"
 import { syncToPenpot } from "@/lib/penpot-sync"
+import { deleteFile } from "@/lib/penpot"
 
 // Resolve a document by its 8-char shortId (first segment of the CUID).
 async function findByShortId(shortId: string) {
@@ -51,5 +52,12 @@ export async function DELETE(
   if (!doc) return Response.json({ error: "Not found" }, { status: 404 })
 
   await prisma.document.delete({ where: { id: doc.id } })
+
+  if (doc.penpotFileId) {
+    deleteFile(doc.penpotFileId).catch((err) =>
+      console.error("[penpot] failed to delete file:", err)
+    )
+  }
+
   return new Response(null, { status: 204 })
 }

@@ -58,6 +58,13 @@ export interface PenpotProfile {
   id: string
   email: string
   fullname: string
+  defaultTeamId: string
+}
+
+export interface PenpotProject {
+  id: string
+  name: string
+  teamId: string
 }
 
 export interface PenpotComponent {
@@ -127,7 +134,18 @@ export type ChangeOp =
 
 /** Verify that credentials are valid. */
 export function getProfile() {
-  return get<PenpotProfile>("get-profile")
+  // Use POST — GET is blocked by Cloudflare on design.penpot.app
+  return post<PenpotProfile>("get-profile", {})
+}
+
+/** List all projects for a team. */
+export function getTeamProjects(teamId: string) {
+  return post<PenpotProject[]>("get-team-projects", { "team-id": teamId })
+}
+
+/** Create a new project inside a team. */
+export function createProject(teamId: string, name: string) {
+  return post<PenpotProject>("create-project", { "team-id": teamId, name })
 }
 
 /**
@@ -181,6 +199,11 @@ export function updateFile(
     "session-id": sessionId,
     changes,
   })
+}
+
+/** Delete a file. Non-fatal if the file no longer exists. */
+export function deleteFile(fileId: string) {
+  return post<void>("delete-file", { id: fileId })
 }
 
 /** The zero UUID — Penpot uses this as the root frame ID of every page. */

@@ -19,6 +19,9 @@ import {
   updateFile,
   ROOT_FRAME_ID,
   type ChangeOp,
+  type PenpotComponent,
+  type PenpotObject,
+  type PenpotPage,
 } from "@/lib/penpot"
 
 // ---------------------------------------------------------------------------
@@ -27,6 +30,41 @@ import {
 
 function isPenpotConfigured() {
   return !!(process.env.PENPOT_ACCESS_TOKEN && process.env.PENPOT_PROJECT_ID)
+}
+
+// ---------------------------------------------------------------------------
+// Library file cache (5-minute TTL — avoids re-fetching on every save)
+// ---------------------------------------------------------------------------
+
+interface LibData {
+  fileId: string
+  components: Record<string, PenpotComponent>
+  pagesIndex: Record<string, PenpotPage>
+}
+
+let _libCache: { data: LibData; ts: number } | null = null
+const LIB_CACHE_TTL_MS = 5 * 60 * 1000
+
+async function getLibraryData(): Promise<LibData | null> {
+  const fileId = process.env.PENPOT_LIBRARY_FILE_ID
+  if (!fileId) return null
+
+  const now = Date.now()
+  if (_libCache && now - _libCache.ts < LIB_CACHE_TTL_MS) return _libCache.data
+
+  try {
+    const file = await getFile(fileId)
+    const data: LibData = {
+      fileId: file.id,
+      components: file.data.components ?? {},
+      pagesIndex: file.data.pagesIndex,
+    }
+    _libCache = { data, ts: now }
+    return data
+  } catch (err) {
+    console.error("[penpot-sync] failed to fetch library file:", err)
+    return null
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -41,17 +79,41 @@ interface TipTapNode {
   marks?: Array<{ type: string }>
 }
 
+interface TemplateBlockData {
+  componentId: string
+  componentPath: string
+  componentName: string
+  title: string   // first heading inside the block
+  body: string    // remaining text
+}
+
 interface SheetData {
   index: number
   layoutId: string
   title: string   // first heading text, or "Untitled Sheet"
   body: string    // all paragraph text, newline-separated
+  blocks: TemplateBlockData[]
 }
 
 /** Recursively collect all text leaves from a node. */
 function extractText(node: TipTapNode): string {
   if (node.type === "text") return node.text ?? ""
   return (node.content ?? []).map(extractText).join("")
+}
+
+/** Extract title + body text from a node's children (heading first, rest body). */
+function extractTitleBody(node: TipTapNode): { title: string; body: string } {
+  let title = ""
+  const bodyLines: string[] = []
+  for (const child of node.content ?? []) {
+    if (child.type === "heading" && !title) {
+      title = extractText(child).trim()
+    } else {
+      const text = extractText(child).trim()
+      if (text) bodyLines.push(text)
+    }
+  }
+  return { title, body: bodyLines.join("\n") }
 }
 
 /** Walk the TipTap document JSON and return one SheetData per sheet node. */
@@ -63,11 +125,22 @@ export function extractSheets(doc: TipTapNode): SheetData[] {
 
     const index = (node.attrs?.index as number) ?? sheets.length
     const layoutId = (node.attrs?.layoutId as string) ?? "single-column"
+    const blocks: TemplateBlockData[] = []
+
     let title = ""
     const bodyLines: string[] = []
 
     for (const child of node.content ?? []) {
-      if (child.type === "heading" && !title) {
+      if (child.type === "templateBlock") {
+        const { title: bTitle, body: bBody } = extractTitleBody(child)
+        blocks.push({
+          componentId: (child.attrs?.componentId as string) ?? "",
+          componentPath: (child.attrs?.componentPath as string) ?? "",
+          componentName: (child.attrs?.componentName as string) ?? "",
+          title: bTitle,
+          body: bBody,
+        })
+      } else if (child.type === "heading" && !title) {
         title = extractText(child).trim()
       } else {
         const text = extractText(child).trim()
@@ -80,6 +153,7 @@ export function extractSheets(doc: TipTapNode): SheetData[] {
       layoutId,
       title: title || `Sheet ${index + 1}`,
       body: bodyLines.join("\n"),
+      blocks,
     })
   }
 
@@ -94,6 +168,7 @@ const FRAME_WIDTH = 794
 const FRAME_HEIGHT = 1122
 const FRAME_GAP = 40
 const FRAME_NAME_PREFIX = "fs-"   // "firestarter" prefix — used to identify our frames
+const BLOCK_NAME_PREFIX = "fsblk:" // prefix for component instance frames inside a sheet frame
 
 /** Identity 2D transform matrix — required by Penpot's shape schema. */
 const IDENTITY_MATRIX = { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 }
@@ -111,82 +186,6 @@ function shapeGeometry(x: number, y: number, w: number, h: number) {
     transform: IDENTITY_MATRIX,
     "transform-inverse": IDENTITY_MATRIX,
   }
-}
-
-function buildNewFrameChanges(pageId: string, sheets: SheetData[]): ChangeOp[]
-function buildNewFrameChanges(pageId: string, sheet: SheetData): ChangeOp[]
-function buildNewFrameChanges(pageId: string, sheetsOrSheet: SheetData | SheetData[]): ChangeOp[] {
-  const sheets = Array.isArray(sheetsOrSheet) ? sheetsOrSheet : [sheetsOrSheet]
-  return _buildFrameChanges(pageId, sheets)
-}
-
-function _buildFrameChanges(pageId: string, sheets: SheetData[]): ChangeOp[] {
-  const changes: ChangeOp[] = []
-
-  for (const sheet of sheets) {
-    const frameId = randomUUID()
-    const titleId = randomUUID()
-    const x = sheet.index * (FRAME_WIDTH + FRAME_GAP)
-
-    const textX = x + 40
-    const textY = 60
-    const textW = FRAME_WIDTH - 80
-    const textH = 60
-
-    // Frame object
-    changes.push({
-      type: "add-obj",
-      id: frameId,
-      "page-id": pageId,
-      "parent-id": ROOT_FRAME_ID,
-      "frame-id": ROOT_FRAME_ID,
-      obj: {
-        id: frameId,
-        name: `${FRAME_NAME_PREFIX}${sheet.index}`,
-        type: "frame",
-        x,
-        y: 0,
-        width: FRAME_WIDTH,
-        height: FRAME_HEIGHT,
-        "parent-id": ROOT_FRAME_ID,
-        "frame-id": ROOT_FRAME_ID,
-        fills: [{ "fill-color": "#FFFFFF", "fill-opacity": 1 }],
-        strokes: [],
-        shapes: [titleId],
-        "clip-content": false,
-        rotation: 0,
-        ...shapeGeometry(x, 0, FRAME_WIDTH, FRAME_HEIGHT),
-      },
-    })
-
-    // Title + body text object inside the frame
-    changes.push({
-      type: "add-obj",
-      id: titleId,
-      "page-id": pageId,
-      "parent-id": frameId,
-      "frame-id": frameId,
-      obj: {
-        id: titleId,
-        name: "content",
-        type: "text",
-        x: textX,
-        y: textY,
-        width: textW,
-        height: textH,
-        "parent-id": frameId,
-        "frame-id": frameId,
-        "grow-type": "auto-height",
-        rotation: 0,
-        fills: [],
-        strokes: [],
-        content: buildTextContent(sheet.title, sheet.body),
-        ...shapeGeometry(textX, textY, textW, textH),
-      },
-    })
-  }
-
-  return changes
 }
 
 /** Build a Penpot text content tree from title + body strings. */
@@ -233,64 +232,398 @@ function buildTextContent(title: string, body: string) {
   }
 }
 
+/** Build a minimal text content with a single paragraph for slot overrides. */
+function buildSlotTextContent(text: string) {
+  return {
+    type: "root",
+    children: [
+      {
+        type: "paragraph-set",
+        children: [
+          {
+            type: "paragraph",
+            fills: [],
+            children: [{ text }],
+          },
+        ],
+      },
+    ],
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Component instance builder
+// ---------------------------------------------------------------------------
+
 /**
- * Build a minimal diff between current editor sheets and existing Penpot objects.
+ * Clone a component from the library file into a new location on the canvas.
  *
- * Rules:
- *   - Frame exists for this sheet index → only update the "content" text object
- *     (preserves designer changes to layout, colours, position, etc.)
- *   - No frame yet → add frame + text (new sheet)
- *   - Frame exists but sheet was removed → delete the frame
+ * - Sets `component-id` + `component-file` on the root instance frame
+ * - Sets `shape-ref` on every cloned shape pointing to the original library shape
+ * - Remaps all internal IDs so children reference the new UUIDs
+ * - Overrides text content for any shape whose name starts with "fs:" using slotValues
+ *
+ * Returns the `add-obj` changes and the height of the root instance frame
+ * (so callers can stack the next block below it).
+ */
+function buildComponentInstance(
+  pageId: string,
+  parentFrameId: string,
+  placeX: number,
+  placeY: number,
+  block: TemplateBlockData,
+  blockIdx: number,
+  lib: LibData,
+): { changes: ChangeOp[]; height: number } {
+  const componentId = block.componentId
+  if (!componentId) return { changes: [], height: 0 }
+
+  // Look up the component definition to get the main instance location
+  const component = lib.components[componentId]
+  if (!component) {
+    console.warn(`[penpot-sync] component ${componentId} not found in library`)
+    return { changes: [], height: 0 }
+  }
+
+  const rootId = component.mainInstanceId
+  const libPageId = component.mainInstancePage
+  if (!rootId || !libPageId) {
+    console.warn(`[penpot-sync] component ${componentId} has no mainInstanceId/mainInstancePage`)
+    return { changes: [], height: 0 }
+  }
+
+  const libPageObjects = lib.pagesIndex[libPageId]?.objects
+  if (!libPageObjects) {
+    console.warn(`[penpot-sync] library page ${libPageId} not found`)
+    return { changes: [], height: 0 }
+  }
+
+  const root = libPageObjects[rootId]
+  if (!root) return { changes: [], height: 0 }
+
+  // BFS: collect all shapes that belong to this component instance
+  const childrenMap = new Map<string, string[]>()
+  for (const obj of Object.values(libPageObjects)) {
+    const pid = obj.parentId
+    if (pid) {
+      if (!childrenMap.has(pid)) childrenMap.set(pid, [])
+      childrenMap.get(pid)!.push(obj.id)
+    }
+  }
+
+  const allOrigIds: string[] = []
+  const bfsQueue = [rootId]
+  while (bfsQueue.length) {
+    const id = bfsQueue.shift()!
+    allOrigIds.push(id)
+    for (const childId of childrenMap.get(id) ?? []) {
+      bfsQueue.push(childId)
+    }
+  }
+
+  // Create a fresh UUID for every shape in the component tree
+  const idMap = new Map<string, string>()
+  for (const origId of allOrigIds) {
+    idMap.set(origId, randomUUID())
+  }
+
+  const dx = placeX - root.x
+  const dy = placeY - root.y
+
+  const slotValues: Record<string, string> = {
+    "fs:title": block.title,
+    "fs:body": block.body,
+  }
+
+  const changes: ChangeOp[] = []
+
+  for (const origId of allOrigIds) {
+    const orig = libPageObjects[origId] as unknown as Record<string, unknown> & PenpotObject
+    if (!orig) continue
+
+    const newId = idMap.get(origId)!
+    const isRoot = origId === rootId
+
+    const newParentId = isRoot
+      ? parentFrameId
+      : (idMap.get(orig.parentId ?? "") ?? parentFrameId)
+
+    const newFrameId = isRoot
+      ? parentFrameId
+      : (idMap.get(orig.frameId ?? "") ?? newParentId)
+
+    // Strip camelCase navigation keys — we'll write them back as kebab-case below
+    const origRecord = orig as Record<string, unknown>
+    const rest: Record<string, unknown> = {}
+    for (const [k, v] of Object.entries(origRecord)) {
+      if (k !== "parentId" && k !== "frameId") rest[k] = v
+    }
+
+    const obj: Record<string, unknown> = {
+      ...rest,
+      id: newId,
+      x: (orig.x as number) + dx,
+      y: (orig.y as number) + dy,
+      "parent-id": newParentId,
+      "frame-id": newFrameId,
+      "shape-ref": origId,
+      ...shapeGeometry(
+        (orig.x as number) + dx,
+        (orig.y as number) + dy,
+        orig.width as number,
+        orig.height as number,
+      ),
+    }
+
+    // Remap child shape IDs in frames / groups
+    if (Array.isArray(obj.shapes)) {
+      obj.shapes = (obj.shapes as string[]).map((id) => idMap.get(id) ?? id)
+    }
+
+    if (isRoot) {
+      obj["component-id"] = componentId
+      obj["component-file"] = lib.fileId
+      obj["component-root"] = true
+      obj.name = `${BLOCK_NAME_PREFIX}${blockIdx}`
+    } else {
+      // Override slot text content
+      const shapeName = (orig.name as string) ?? ""
+      if (shapeName.startsWith("fs:") && orig.type === "text") {
+        const slotText = slotValues[shapeName]
+        if (slotText !== undefined) {
+          obj.content = buildSlotTextContent(slotText)
+        }
+      }
+    }
+
+    changes.push({
+      type: "add-obj",
+      id: newId,
+      "page-id": pageId,
+      "parent-id": newParentId,
+      "frame-id": newFrameId,
+      obj,
+    })
+  }
+
+  return { changes, height: root.height as number }
+}
+
+// ---------------------------------------------------------------------------
+// Frame change builders
+// ---------------------------------------------------------------------------
+
+function buildNewFrameChanges(pageId: string, sheets: SheetData[], lib?: LibData | null): ChangeOp[]
+function buildNewFrameChanges(pageId: string, sheet: SheetData, lib?: LibData | null): ChangeOp[]
+function buildNewFrameChanges(pageId: string, sheetsOrSheet: SheetData | SheetData[], lib?: LibData | null): ChangeOp[] {
+  const sheets = Array.isArray(sheetsOrSheet) ? sheetsOrSheet : [sheetsOrSheet]
+  return _buildFrameChanges(pageId, sheets, lib)
+}
+
+function _buildFrameChanges(pageId: string, sheets: SheetData[], lib?: LibData | null): ChangeOp[] {
+  const changes: ChangeOp[] = []
+
+  for (const sheet of sheets) {
+    const frameId = randomUUID()
+    const titleId = randomUUID()
+    const x = sheet.index * (FRAME_WIDTH + FRAME_GAP)
+
+    const textX = x + 40
+    const textY = 60
+    const textW = FRAME_WIDTH - 80
+    const textH = 60
+
+    // Sheet frame — block IDs are generated later inside buildComponentInstance
+    changes.push({
+      type: "add-obj",
+      id: frameId,
+      "page-id": pageId,
+      "parent-id": ROOT_FRAME_ID,
+      "frame-id": ROOT_FRAME_ID,
+      obj: {
+        id: frameId,
+        name: `${FRAME_NAME_PREFIX}${sheet.index}`,
+        type: "frame",
+        x,
+        y: 0,
+        width: FRAME_WIDTH,
+        height: FRAME_HEIGHT,
+        "parent-id": ROOT_FRAME_ID,
+        "frame-id": ROOT_FRAME_ID,
+        fills: [{ "fill-color": "#FFFFFF", "fill-opacity": 1 }],
+        strokes: [],
+        shapes: [],   // Penpot resolves child ordering via add-obj parent references
+        "clip-content": false,
+        rotation: 0,
+        ...shapeGeometry(x, 0, FRAME_WIDTH, FRAME_HEIGHT),
+      },
+    })
+
+    // Sheet-level title + body text
+    changes.push({
+      type: "add-obj",
+      id: titleId,
+      "page-id": pageId,
+      "parent-id": frameId,
+      "frame-id": frameId,
+      obj: {
+        id: titleId,
+        name: "content",
+        type: "text",
+        x: textX,
+        y: textY,
+        width: textW,
+        height: textH,
+        "parent-id": frameId,
+        "frame-id": frameId,
+        "grow-type": "auto-height",
+        rotation: 0,
+        fills: [],
+        strokes: [],
+        content: buildTextContent(sheet.title, sheet.body),
+        ...shapeGeometry(textX, textY, textW, textH),
+      },
+    })
+
+    // Component instances for each template block
+    const BLOCK_GAP = 24
+    let blockY = textY + textH + BLOCK_GAP
+
+    for (let i = 0; i < sheet.blocks.length; i++) {
+      const block = sheet.blocks[i]
+
+      if (lib) {
+        const { changes: instanceChanges, height } = buildComponentInstance(
+          pageId,
+          frameId,
+          textX,
+          blockY,
+          block,
+          i,
+          lib,
+        )
+        changes.push(...instanceChanges)
+        blockY += (height || 120) + BLOCK_GAP
+      } else {
+        // Fallback when library is unavailable: plain labeled text block
+        const blockId = randomUUID()
+        const BLOCK_H = 120
+        changes.push({
+          type: "add-obj",
+          id: blockId,
+          "page-id": pageId,
+          "parent-id": frameId,
+          "frame-id": frameId,
+          obj: {
+            id: blockId,
+            name: `${BLOCK_NAME_PREFIX}${i}`,
+            type: "text",
+            x: textX,
+            y: blockY,
+            width: textW,
+            height: BLOCK_H,
+            "parent-id": frameId,
+            "frame-id": frameId,
+            "grow-type": "auto-height",
+            rotation: 0,
+            fills: [],
+            strokes: [],
+            content: buildTextContent(
+              block.title || block.componentName,
+              block.body
+            ),
+            ...shapeGeometry(textX, blockY, textW, BLOCK_H),
+          },
+        })
+        blockY += BLOCK_H + BLOCK_GAP
+      }
+    }
+  }
+
+  return changes
+}
+
+// ---------------------------------------------------------------------------
+// Deletion helpers
+// ---------------------------------------------------------------------------
+
+type PageObjectsIndex = Record<string, { id: string; name?: string; type?: string; parentId?: string }>
+
+/** Build a parent→children index from the full page objects map. */
+function buildChildrenIndex(objects: PageObjectsIndex): Map<string, string[]> {
+  const index = new Map<string, string[]>()
+  for (const obj of Object.values(objects)) {
+    if (obj.parentId) {
+      if (!index.has(obj.parentId)) index.set(obj.parentId, [])
+      index.get(obj.parentId)!.push(obj.id)
+    }
+  }
+  return index
+}
+
+/**
+ * Return all descendant IDs of `rootId` in bottom-up order (leaves first).
+ * Penpot requires children to be deleted before their parent.
+ */
+function collectDescendantsBottomUp(childrenIndex: Map<string, string[]>, rootId: string): string[] {
+  // BFS top-down, then reverse for bottom-up deletion order
+  const ordered: string[] = []
+  const queue = [rootId]
+  while (queue.length) {
+    const id = queue.shift()!
+    for (const childId of childrenIndex.get(id) ?? []) {
+      ordered.push(childId)
+      queue.push(childId)
+    }
+  }
+  return ordered.reverse()
+}
+
+/** Emit del-obj changes for a subtree: children first, then the root itself. */
+function deleteSubtree(pageId: string, childrenIndex: Map<string, string[]>, rootId: string): ChangeOp[] {
+  const descendants = collectDescendantsBottomUp(childrenIndex, rootId)
+  return [
+    ...descendants.map((id): ChangeOp => ({ type: "del-obj", id, "page-id": pageId })),
+    { type: "del-obj", id: rootId, "page-id": pageId },
+  ]
+}
+
+// ---------------------------------------------------------------------------
+
+/**
+ * Build sync changes between current editor sheets and existing Penpot objects.
+ *
+ * Strategy: delete-and-recreate every fs-* frame on each save.
+ * Simpler and more reliable than mod-obj — avoids Penpot schema validation
+ * issues with partial updates. Designers should use "detach" in Penpot if
+ * they want to make layout changes that persist across editor saves.
  */
 function buildSyncChanges(
   pageId: string,
-  page: { id: string; objects: Record<string, { id: string; name?: string; type?: string; parentId?: string }> },
-  sheets: SheetData[]
+  page: { id: string; objects: PageObjectsIndex },
+  sheets: SheetData[],
+  lib?: LibData | null,
 ): ChangeOp[] {
   const changes: ChangeOp[] = []
 
-  // Index our frames by sheet index
-  const existingFrames = new Map<number, { id: string; name: string }>()
+  const childrenIndex = buildChildrenIndex(page.objects)
+
+  // Find all existing fs-* frames
+  const existingFrames: { id: string; name: string }[] = []
   for (const obj of Object.values(page.objects)) {
     if (obj.type === "frame" && obj.name?.startsWith(FRAME_NAME_PREFIX)) {
-      const idx = parseInt(obj.name.slice(FRAME_NAME_PREFIX.length), 10)
-      if (!isNaN(idx)) existingFrames.set(idx, obj as { id: string; name: string })
+      existingFrames.push(obj as { id: string; name: string })
     }
   }
 
-  const handledIndices = new Set<number>()
-
-  for (const sheet of sheets) {
-    const frame = existingFrames.get(sheet.index)
-
-    if (frame) {
-      // Frame already exists — find its "content" child and update only the text
-      handledIndices.add(sheet.index)
-      const contentObj = Object.values(page.objects).find(
-        (o) => o.parentId === frame.id && o.name === "content"
-      )
-      if (contentObj) {
-        changes.push({
-          type: "mod-obj",
-          id: contentObj.id,
-          "page-id": pageId,
-          operations: [
-            { type: "set", attr: "content", val: buildTextContent(sheet.title, sheet.body) },
-          ],
-        })
-      }
-    } else {
-      // New sheet — add frame + text
-      changes.push(...buildNewFrameChanges(pageId, sheet))
-    }
+  // Delete all existing frames (children first)
+  for (const frame of existingFrames) {
+    console.log(`[penpot-sync] removing frame ${frame.name} for recreation`)
+    changes.push(...deleteSubtree(pageId, childrenIndex, frame.id))
   }
 
-  // Delete frames whose sheet no longer exists
-  for (const [idx, frame] of existingFrames) {
-    if (!handledIndices.has(idx)) {
-      changes.push({ type: "del-obj", id: frame.id, "page-id": pageId })
-    }
-  }
+  // Recreate all current sheets fresh
+  changes.push(...buildNewFrameChanges(pageId, sheets, lib))
 
   return changes
 }
@@ -320,7 +653,7 @@ export async function syncToPenpot(doc: SyncableDocument): Promise<void> {
     let revn: number
     let vern: number
     let pageId: string
-    let existingPage: { id: string; objects: Record<string, { name?: string; type?: string }> } | null = null
+    let existingPage: { id: string; objects: PageObjectsIndex } | null = null
 
     if (!fileId) {
       // First sync: create file — response already has revn + page ID
@@ -351,21 +684,33 @@ export async function syncToPenpot(doc: SyncableDocument): Promise<void> {
       revn = file.revn
       vern = file.vern ?? 0
       pageId = file.data.pages[0]
-      existingPage = file.data.pagesIndex[pageId] as typeof existingPage
+      const rawPage = file.data.pagesIndex[pageId]
+      if (rawPage) {
+        existingPage = { id: rawPage.id, objects: rawPage.objects as PageObjectsIndex }
+      }
     }
 
     const sessionId = randomUUID()
     const sheets = extractSheets(doc.content as TipTapNode)
 
+    // Fetch the component library if any sheet has template blocks
+    const hasBlocks = sheets.some((s) => s.blocks.length > 0)
+    const lib = hasBlocks ? await getLibraryData() : null
+
     const changes = existingPage
-      ? buildSyncChanges(pageId, existingPage, sheets)   // smart diff — preserves designer work
-      : buildNewFrameChanges(pageId, sheets)             // first sync — add all frames fresh
+      ? buildSyncChanges(pageId, existingPage, sheets, lib)   // delete existing fs-* frames + recreate
+      : buildNewFrameChanges(pageId, sheets, lib)              // first sync — add all frames fresh
+
+    console.log(
+      `[penpot-sync] doc=${doc.id.slice(0, 8)} sheets=${sheets.length} changes=${changes.length}`,
+      changes.map((c) => `${c.type}:${c.id.slice(0, 8)}`).join(" "),
+    )
 
     if (changes.length === 0) return
 
     await updateFile(fileId, revn, vern, sessionId, changes)
+    console.log(`[penpot-sync] ok revn=${revn}`)
   } catch (err) {
-    // Log but don't surface — sync failure must never break the save response
     console.error("[penpot-sync] failed:", err)
   }
 }

@@ -17,6 +17,10 @@ import { Selection } from "@tiptap/extensions"
 import { Sheet } from "@/components/tiptap-node/sheet-node/sheet-node"
 import "@/components/tiptap-node/sheet-node/sheet-node.scss"
 
+// Template block node
+import { TemplateBlock, type TemplateBlockAttrs } from "@/components/tiptap-node/template-block-node/template-block-node"
+import "@/components/tiptap-node/template-block-node/template-block-node.scss"
+
 // Tiptap UI primitives
 import { Button } from "@/components/tiptap-ui-primitive/button"
 import { Spacer } from "@/components/tiptap-ui-primitive/spacer"
@@ -87,6 +91,8 @@ export interface SheetSummary {
 export interface EditorCommands {
   addSheet: () => void
   removeCurrentSheet: () => void
+  setSheetLayout: (index: number, layoutId: string) => void
+  insertTemplateBlock: (attrs: TemplateBlockAttrs) => void
   getContent: () => ReturnType<NonNullable<ReturnType<typeof useEditor>>["getJSON"]>
 }
 
@@ -289,6 +295,7 @@ export function SheetEditor({
         link: { openOnClick: false, enableClickSelection: true },
       }),
       Sheet,
+      TemplateBlock,
       HorizontalRule,
       TextAlign.configure({ types: ["heading", "paragraph"] }),
       TaskList,
@@ -316,6 +323,8 @@ export function SheetEditor({
       onCommandsReady?.({
         addSheet: () => e.commands.addSheet(),
         removeCurrentSheet: () => e.commands.removeCurrentSheet(),
+        setSheetLayout: (index, layoutId) => e.commands.setSheetLayout(index, layoutId),
+        insertTemplateBlock: (attrs) => e.commands.insertTemplateBlock(attrs),
         getContent: () => e.getJSON(),
       })
     },

@@ -1,0 +1,20 @@
+.template-block-node {
+  position: relative;
+  margin: 1rem 0;
+  padding: 0.75rem 1rem;
+  border-left: 3px solid var(--tt-brand-color-500, #ef382d);
+  border-radius: 0 4px 4px 0;
+  background: color-mix(in srgb, var(--tt-brand-color-500, #ef382d) 5%, transparent);
+
+  &::before {
+    content: attr(data-component-name);
+    display: block;
+    font-size: 0.65rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--tt-brand-color-500, #ef382d);
+    margin-bottom: 0.5rem;
+    opacity: 0.8;
+  }
+}

@@ -2,6 +2,7 @@
 
 import clsx from "clsx"
 import type { SheetSummary } from "@/components/editor/sheet-editor"
+import { TemplatePicker, useComponentCatalog, type InsertableComponent } from "@/components/editor/template-picker"
 
 // ---------------------------------------------------------------------------
 // Layout badge label map
@@ -85,6 +86,7 @@ interface SheetPanelProps {
   onAddSheet: () => void
   onRemoveSheet: () => void
   canRemove: boolean
+  onInsertBlock: (comp: InsertableComponent) => void
 }
 
 export function SheetPanel({
@@ -94,7 +96,9 @@ export function SheetPanel({
   onAddSheet,
   onRemoveSheet,
   canRemove,
+  onInsertBlock,
 }: SheetPanelProps) {
+  const { catalog, loading } = useComponentCatalog()
   return (
     <aside className="sheet-panel">
       <div className="sheet-panel__header">
@@ -111,6 +115,15 @@ export function SheetPanel({
             onClick={() => onSheetClick(sheet.index)}
           />
         ))}
+      </div>
+
+      <div className="sheet-panel__templates">
+        <p className="sheet-panel__templates-heading">Sheet template</p>
+        <TemplatePicker
+          catalog={catalog}
+          loading={loading}
+          onInsert={onInsertBlock}
+        />
       </div>
 
       <div className="sheet-panel__actions">
