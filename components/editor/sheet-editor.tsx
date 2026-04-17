@@ -41,6 +41,7 @@ import { HorizontalRule } from "@/components/tiptap-node/horizontal-rule-node/ho
 
 // Tiptap UI
 import { HeadingDropdownMenu } from "@/components/tiptap-ui/heading-dropdown-menu"
+import { ParagraphTextButton } from "@/components/tiptap-ui/paragraph-text-button"
 import { ImageUploadButton } from "@/components/tiptap-ui/image-upload-button"
 import { ListDropdownMenu } from "@/components/tiptap-ui/list-dropdown-menu"
 import { BlockquoteButton } from "@/components/tiptap-ui/blockquote-button"
@@ -163,6 +164,7 @@ const MainToolbarContent = ({
     </ToolbarGroup>
     <ToolbarSeparator />
     <ToolbarGroup>
+      <ParagraphTextButton />
       <HeadingDropdownMenu modal={false} levels={[1, 2, 3, 4]} />
       <ListDropdownMenu
         modal={false}

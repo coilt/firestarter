@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/db"
+import { syncToPenpot } from "@/lib/penpot-sync"
 
 // Resolve a document by its 8-char shortId (first segment of the CUID).
 async function findByShortId(shortId: string) {
@@ -34,6 +35,9 @@ export async function PATCH(
       version: { increment: 1 },
     },
   })
+
+  // Fire-and-forget — sync failure must never block the save response
+  syncToPenpot(updated).catch(() => {})
 
   return Response.json(updated)
 }
