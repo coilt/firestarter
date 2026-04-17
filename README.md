@@ -1,22 +1,71 @@
 # Firestarter — Document Authoring Platform
 
-A structured document authoring tool that decouples writing from design. Writers compose content in a Tiptap-based editor; designers consume and refine it in Figma — all synced through a shared database.
+**Think Google Slides, but the slides live in Penpot.**
+
+A structured document authoring and design collaboration platform for organisations. Writers compose content in a Tiptap-based editor; designers apply layout, typography, and visual polish in Penpot — all synced bidirectionally through a shared database, with zero manual coordination required.
+
+---
+
+## Product Vision
+
+- An **org-wide collaboration tool**: every user has a personal area (dashboard) showing documents they own or that have been shared with them.
+- Writers pick a **Document Template** (e.g. *Scientific Report*, *Company Overview*) when starting a new document. The template defines how many pages the document has and what layout each page uses.
+- Within a template, each page has a **layout** (`layoutId`) — this is the contract between the editor and Penpot.
+- **Both sides are read/write for content**: text, images, charts, and graphs all sync in both directions.
+- **Layer structure is locked**: frame positions and layout skeleton are set by designers and cannot be moved by writers. Writers work with content only; designers control both content and layout.
+- **Zero manual coordination**: no plugin to keep open, no handoff step. Writer saves → Penpot updates. Designer edits → editor updates. It just works.
+
+---
+
+## Roles & Boundaries
+
+| Action | Writer (Tiptap) | Designer (Penpot) |
+|---|---|---|
+| Edit text content | ✓ | ✓ |
+| Upload images / charts / graphs | ✓ | — |
+| Enhance / replace images | — | ✓ → syncs back to editor |
+| Add / remove sheets | ✓ | — |
+| Move / resize frames | ✗ locked | ✓ |
+| Apply typography & colour | ✗ | ✓ |
+| Choose sheet layout | ✓ (from template presets) | ✓ |
 
 ---
 
 ## How It Works
 
 ```
-Writer (Tiptap editor)  ─────────────────┐
-                                         ▼
-                               Database (PostgreSQL)
-                                         ▲
-Designer (Figma plugin) ─────────────────┘
+Writer (Tiptap editor)  ◄─────────────────────────┐
+        │                                          │
+        ▼                                          │
+  Next.js API (saves doc + uploads assets)         │
+        │                                          │
+        ├──► Asset store (S3)              Penpot webhook
+        │                               (text + asset changes)
+        ▼                                          │
+Database (PostgreSQL)                              │
+        │                                          │
+        ▼                                          │
+  Penpot REST API ──── creates/updates ──────► Penpot file
+                                                   │
+                                      Designer edits text / layout /
+                                      enhances or replaces images
 ```
 
-- Writers never open Figma.
-- Designers never rewrite content — they apply layout, typography, and visual polish.
-- Changes by either party sync back to the DB, which notifies the other side.
+- Writers never open Penpot.
+- Writers upload raw images, charts, and graphs — designers enhance or replace them in Penpot, and the updated assets sync back to the editor.
+- Designers can also edit text in Penpot — those changes sync back to the editor.
+- Layer positions and frame structure are locked in Penpot — writers cannot break the layout.
+- All sync is server-side and unattended.
+
+---
+
+## Why Penpot (not Figma)
+
+Figma's REST API is read-only for file content — creating or modifying frames requires a plugin running inside an active Figma session. That means a human always has to have the app open to process sync events. This fundamentally breaks the zero-coordination model.
+
+Penpot's REST API is fully writable server-side. Frames can be created, updated, and deleted by the Next.js backend with no one present. Penpot also emits webhooks on file changes, enabling the reverse direction (designer → editor) for both text and asset updates.
+
+**Decision: Penpot for v1 and the foreseeable future.**
 
 ---
 
@@ -26,17 +75,23 @@ Designer (Figma plugin) ─────────────────┘
 - Single ProseMirror instance with a custom `sheet` node.
 - A document is a sequence of fixed-height sheets (A4 by default).
 - Output is always structured JSON — no HTML serialisation hits the API.
-- Writers choose a **document template** (e.g. *Scientific Report*, *Company Overview*) when creating a document. The template governs how many sheets there are and what layout each sheet uses.
+- Writers choose a **Document Template** when creating a document. The template governs how many sheets there are and what layout each sheet uses.
+- Writers upload images, charts, and graphs directly in the editor; these are stored in S3 and referenced by URL in the document JSON.
 
-### 2. Database (PostgreSQL + Prisma, hosted on AWS RDS / Aurora Serverless)
-- Single source of truth for documents, sheets, templates, users, and sharing.
-- Realtime change notifications via AWS AppSync subscriptions or API Gateway WebSockets.
-- Amplify Auth (Cognito) handles identity — no separate auth service needed.
+### 2. Database (PostgreSQL + Prisma) + Asset Store (S3)
+- PostgreSQL is the single source of truth for documents, sheets, templates, users, and sharing.
+- S3 (or compatible) stores binary assets — images, charts, graphs — referenced by URL in the document JSON.
+- Hosted on AWS RDS / Aurora Serverless.
+- Realtime change notifications via AWS AppSync subscriptions or API Gateway WebSockets (v2+).
+- Amplify Auth (Cognito) handles identity (v2+).
 
-### 3. Figma Plugin
-- Listens to DB via WebSocket / AppSync subscription.
-- Maps each sheet's JSON content to a Figma frame using the sheet's `layoutId`.
-- Designer edits text in Figma → plugin `PATCH`es the document → DB notifies Tiptap.
+### 3. Penpot (via REST API + Webhooks)
+- On document save, the Next.js backend calls the Penpot REST API to create or update frames — no plugin, no open session required.
+- Each sheet maps to a Penpot frame via `layoutId` → Penpot component key.
+- Asset URLs from S3 are passed into Penpot frames as image fills or embedded references.
+- Designer enhances or replaces an image in Penpot → Penpot fires a webhook → Next.js API retrieves the updated asset, uploads to S3, patches the DB → Tiptap session receives the update.
+- Designer edits text → same webhook path → DB → Tiptap.
+- Layer positions are locked in Penpot; only content fields (text, image references) are part of the bidirectional sync contract.
 
 ---
 
@@ -53,18 +108,15 @@ Designer (Figma plugin) ─────────────────┘
     "content": [
       {
         "type": "sheet",
-        "attrs": {
-          "index": 0,
-          "layoutId": "single-column"
-        },
-        "content": []
+        "attrs": { "index": 0, "layoutId": "single-column" },
+        "content": [
+          { "type": "heading", "attrs": { "level": 1 }, "content": [{ "type": "text", "text": "Introduction" }] },
+          { "type": "image", "attrs": { "src": "https://s3.../chart-q1.png", "alt": "Q1 chart" } }
+        ]
       },
       {
         "type": "sheet",
-        "attrs": {
-          "index": 1,
-          "layoutId": "three-columns-table"
-        },
+        "attrs": { "index": 1, "layoutId": "three-columns-table" },
         "content": []
       }
     ]
@@ -82,6 +134,7 @@ User
 
 Document
   id, title, templateId, ownerId, version, content (jsonb), updatedAt
+  penpotFileId    ← ID of the mirrored Penpot file
 
 DocumentShare
   documentId, userId, permission (view | edit)
@@ -91,24 +144,22 @@ DocumentTemplate
     └─ defaultSheets: array of { index, layoutId, label }
 
 SheetLayout
-  id, name, figmaComponentKey, columnCount, description
+  id, name, penpotComponentKey, columnCount, description
     └─ e.g. "single-column", "three-columns-table", "hero-image-left"
 ```
 
 ---
 
-## Accounts & Collaboration (v1 scope)
+## Accounts & Collaboration (v2+ scope)
 
 - Every writer has an account and owns their own documents.
 - Documents can be **shared** with specific users (view or edit permission).
 - Shared documents appear in the recipient's dashboard alongside owned documents.
-- Designers are also users; sharing a document with a designer allows them to edit via Figma.
+- Designers are also users; sharing a document with a designer gives them access via Penpot.
 
 ---
 
-## Templates & Per-Sheet Layouts (post-v1)
-
-> These are not in v1 but the schema and JSON contract are designed to accommodate them from day one.
+## Templates & Per-Sheet Layouts
 
 ### Document Templates
 A document template is a named preset that defines:
@@ -119,7 +170,6 @@ A document template is a named preset that defines:
 Examples: *Scientific Report*, *Company Overview*, *Product Guide*, *Pitch Deck*.
 
 ### Per-Sheet Layout Selection
-Within a document, a writer (or template) can assign a specific layout to each sheet:
 
 | Layout ID | Description |
 |---|---|
@@ -129,18 +179,97 @@ Within a document, a writer (or template) can assign a specific layout to each s
 | `hero-image-left` | Large image on the left, text on the right |
 | `cover` | Full-bleed title sheet |
 
-The `layoutId` on a sheet is the contract between the editor and the Figma plugin. The plugin maps it to a specific Figma component/frame key.
+The `layoutId` is the contract between the editor and Penpot. Each `SheetLayout` record stores a `penpotComponentKey` — the Penpot component the backend uses to instantiate the frame.
 
-### Figma Mapping
-Each `SheetLayout` record stores a `figmaComponentKey` — the Figma node ID or component key the plugin uses to instantiate the frame. When a designer publishes a new layout variant, a new `SheetLayout` row is inserted; the editor immediately offers it as an option.
+---
+
+## URL Structure
+
+Documents use a **stable shortId + decorative slug** pattern:
+
+```
+/documents/[slug]-[shortId]
+```
+
+- `shortId` — first 8 chars of the CUID. Never changes. This is what the server resolves.
+- `slug` — generated from the document title. Updates on rename, but old links still resolve.
+
+Example: `/documents/q1-research-summary-ck8x9p2f`
+
+Moving or renaming a document never breaks the link.
+
+### App Router file structure
+
+```
+app/
+  page.tsx                         → redirect to /dashboard
+  dashboard/
+    page.tsx                       ← personal area (document list)
+  documents/
+    new/
+      page.tsx                     ← template picker
+    [docId]/
+      page.tsx                     ← editor
+      loading.tsx
+      error.tsx
+  api/
+    documents/
+      route.ts                     ← POST (create)
+      [id]/
+        route.ts                   ← GET, PATCH, DELETE
+    upload/
+      route.ts                     ← image → S3
+    penpot/
+      webhook/
+        route.ts                   ← Penpot → DB → Tiptap
+```
+
+---
+
+## Document Storage Format
+
+Documents are stored as **ProseMirror JSON** (`content jsonb` in Postgres).
+
+**Rationale:** JSON is the authoritative, lossless representation of the Tiptap document state. It is still a text format — any external tool (Obsidian plugin, CLI script, etc.) can parse it directly without risk of data loss. Markdown storage was considered and rejected because parsing on load introduces failure modes and ~15% formatting loss with no compensating benefit — JSON is equally portable as a structured text format.
+
+If an Obsidian plugin or other reader is ever needed, it reads the JSON directly. No app changes required.
+
+---
+
+## Versioning & Milestones
+
+### v1 — Proof of Concept
+**Goal:** Writer creates a document (with text and at least one image) → saved to DB + S3 → corresponding Penpot frames created automatically → designer opens Penpot and sees the content. Zero manual coordination.
+
+Scope:
+- [ ] Document save/load wired to DB
+- [ ] Image upload to S3, URL stored in document JSON
+- [ ] One predefined template with `single-column` layout
+- [ ] On save, Next.js calls Penpot REST API to create/update frames with text and images
+- [ ] Designer opens Penpot and sees content without any manual setup
+
+Everything else (auth, sharing, real-time two-way sync, asset replacement webhook, multi-template) is post-v1.
+
+### v2 — Bidirectional Sync + Auth
+- Penpot webhook → DB → Tiptap: designer text edits and image replacements flow back to the editor
+- Updated assets retrieved from Penpot, uploaded to S3, URL patched in DB
+- AWS Cognito auth, personal dashboard
+- Optimistic locking via `version` counter
+
+### v3 — Full Org Product
+- Multiple templates, per-sheet layout switching in the editor
+- Document sharing and permissions
+- Template management UI for admins
+- Real-time collaboration (AppSync / WebSockets)
 
 ---
 
 ## Realtime Sync Strategy
 
-- **v1:** Short-poll on document `version` field (every 10 s) — simple, zero infrastructure overhead.
-- **v2:** Upgrade to AppSync subscriptions or API Gateway WebSockets for sub-second updates.
-- **Conflict resolution:** Last-write-wins on the full `content` blob (acceptable for early versions). Post-v1: optimistic locking via `version` counter; reject stale writes.
+- **v1:** Explicit save; Penpot frames created synchronously on save via REST API.
+- **v2:** Penpot webhooks for designer→editor direction (text + asset changes); WebSocket or poll for editor→designer.
+- **v3:** Full duplex real-time via AppSync subscriptions or API Gateway WebSockets.
+- **Conflict resolution:** Last-write-wins on full `content` blob (v1–v2). Post-v2: optimistic locking via `version` counter; reject stale writes.
 
 ---
 
@@ -149,32 +278,32 @@ Each `SheetLayout` record stores a `figmaComponentKey` — the Figma node ID or 
 | Layer | Choice | Reason |
 |---|---|---|
 | Frontend | Next.js + Tiptap | In use; structured JSON output |
-| Styling | SCSS + CSS vars | In use |
+| Styling | SCSS + Tailwind CSS | In use |
 | ORM | Prisma | Best DX on PostgreSQL; strong typing |
 | Database | PostgreSQL (AWS RDS / Aurora Serverless) | Relational schema; stays in AWS |
-| Auth | AWS Amplify Auth (Cognito) | Already in company AWS setup |
-| Realtime | AWS AppSync or API GW WebSockets | Stays in AWS; AppSync subscriptions fit push pattern |
-| Figma | Figma Plugin API | Fetch + postMessage to plugin UI |
+| Asset storage | AWS S3 | Binary assets (images, charts, graphs) |
+| Auth | AWS Amplify Auth (Cognito) | Already in company AWS setup (v2+) |
+| Realtime | AWS AppSync or API GW WebSockets | Stays in AWS (v2+) |
+| Design tool | **Penpot REST API + Webhooks** | Only option supporting unattended server-side frame generation and asset sync |
 
 ---
 
 ## Dev Setup
 
-This is a [Next.js](https://nextjs.org) project. Run the development server:
+```bash
+pnpm install
+pnpm dev
+```
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+Requires a PostgreSQL instance. Copy `.env.example` to `.env` and set `DATABASE_URL`.
 
-## Learn More
+```bash
+pnpm prisma:migrate:dev
+pnpm prisma:generate
+```
 
-To learn more about Next.js, take a look at the following resources:
+Docker Compose is available for local Postgres:
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+```bash
+docker compose up -d
+```

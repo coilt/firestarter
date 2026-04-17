@@ -1,13 +1,24 @@
 "use client"
 
 import { useCallback, useEffect, useRef, useState } from "react"
+import { useRouter } from "next/navigation"
 
 import LeftPanel from "../ui/catalyst/left-panel"
 
-import { SheetEditor, type SheetSummary } from "@/components/editor/sheet-editor"
+import { SheetEditor, type SheetSummary, type EditorCommands } from "@/components/editor/sheet-editor"
+import type { Content } from "@tiptap/core"
 import { SheetPanel } from "@/components/editor/sheet-panel"
+import { docPath } from "@/lib/doc-url"
 
 import "@/components/editor/editor-layout.scss"
+
+type SaveState = "idle" | "saving" | "saved" | "error"
+
+interface InitialDoc {
+  id: string
+  title: string
+  content: Content
+}
 
 // ---------------------------------------------------------------------------
 // Left sidebar — doc metadata
@@ -18,11 +29,15 @@ function DocSidebar({
   onTitleChange,
   sheetCount,
   layoutId,
+  onSave,
+  saveState,
 }: {
   title: string
   onTitleChange: (v: string) => void
   sheetCount: number
   layoutId: string
+  onSave: () => void
+  saveState: SaveState
 }) {
   return (
     <LeftPanel
@@ -30,6 +45,8 @@ function DocSidebar({
       onTitleChange={onTitleChange}
       sheetCount={sheetCount}
       layoutId={layoutId}
+      onSave={onSave}
+      saveState={saveState}
     />
   )
 }
@@ -38,24 +55,55 @@ function DocSidebar({
 // EditorLayout
 // ---------------------------------------------------------------------------
 
-export function EditorLayout() {
-  const [title, setTitle] = useState("Untitled Document")
+export function EditorLayout({ initialDoc }: { initialDoc?: InitialDoc } = {}) {
+  const router = useRouter()
+  const [title, setTitle] = useState(initialDoc?.title ?? "Untitled Document")
   const [sheets, setSheets] = useState<SheetSummary[]>([])
   const [activeIndex, setActiveIndex] = useState(0)
+  const [saveState, setSaveState] = useState<SaveState>("idle")
 
-  // Ref to the scrollable center panel (owns the editor's overflow-auto)
+  // shortId of the saved document — null until first save
+  const shortIdRef = useRef<string | null>(
+    initialDoc ? initialDoc.id.slice(0, 8) : null
+  )
+  // Keep title accessible inside the save callback without stale closure
+  const titleRef = useRef(title)
+  useEffect(() => { titleRef.current = title }, [title])
+
   const scrollContainerRef = useRef<HTMLDivElement>(null)
+  const editorCommandsRef = useRef<EditorCommands | null>(null)
 
-  // We need a handle to the Tiptap editor to call addSheet / removeCurrentSheet.
-  // SheetEditor exposes its editor via EditorContext; to avoid prop drilling we
-  // keep a lightweight ref updated via the onSheetsChange callback side-channel.
-  // For direct commands we grab the editor from the DOM via a data attribute —
-  // a simpler v1 approach than useImperativeHandle.
-  // Instead, we'll pass command callbacks down through SheetEditor props.
-  const editorCommandsRef = useRef<{
-    addSheet: () => void
-    removeCurrentSheet: () => void
-  } | null>(null)
+  // ---------------------------------------------------------------------------
+  // Save
+  // ---------------------------------------------------------------------------
+  const handleSave = useCallback(async () => {
+    const content = editorCommandsRef.current?.getContent()
+    if (!content) return
+
+    setSaveState("saving")
+    try {
+      if (shortIdRef.current) {
+        await fetch(`/api/documents/${shortIdRef.current}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ title: titleRef.current, content }),
+        })
+      } else {
+        const res = await fetch("/api/documents", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ title: titleRef.current, content }),
+        })
+        const doc = await res.json()
+        shortIdRef.current = doc.id.slice(0, 8)
+        router.replace(docPath({ id: doc.id, title: doc.title }))
+      }
+      setSaveState("saved")
+      setTimeout(() => setSaveState("idle"), 2000)
+    } catch {
+      setSaveState("error")
+    }
+  }, [router])
 
   // ---------------------------------------------------------------------------
   // Scroll → active sheet sync
@@ -82,7 +130,7 @@ export function EditorLayout() {
 
     container.addEventListener("scroll", handleScroll, { passive: true })
     return () => container.removeEventListener("scroll", handleScroll)
-  }, [sheets.length]) // re-bind when sheet count changes
+  }, [sheets.length])
 
   // ---------------------------------------------------------------------------
   // Click on thumbnail → scroll to that sheet
@@ -101,7 +149,7 @@ export function EditorLayout() {
   }, [])
 
   // ---------------------------------------------------------------------------
-  // Sheet commands — surfaced via a small callback ref
+  // Sheet commands
   // ---------------------------------------------------------------------------
   const handleAddSheet = useCallback(() => {
     editorCommandsRef.current?.addSheet()
@@ -123,6 +171,8 @@ export function EditorLayout() {
           onTitleChange={setTitle}
           sheetCount={sheets.length}
           layoutId={activeLayoutId}
+          onSave={handleSave}
+          saveState={saveState}
         />
       </div>
 
@@ -131,6 +181,7 @@ export function EditorLayout() {
         <SheetEditor
           scrollContainerRef={scrollContainerRef as React.RefObject<HTMLDivElement>}
           onSheetsChange={setSheets}
+          initialContent={initialDoc?.content}
           onCommandsReady={(cmds) => {
             editorCommandsRef.current = cmds
           }}

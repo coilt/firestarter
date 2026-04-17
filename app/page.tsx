@@ -1,5 +1,5 @@
-import { EditorLayout } from '@/components/editor/editor-layout'
+import { redirect } from "next/navigation"
 
 export default function Home() {
-  return <EditorLayout />
+  redirect("/dashboard")
 }

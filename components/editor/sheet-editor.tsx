@@ -1,7 +1,8 @@
 "use client"
 
-import { useEffect, useRef, useState } from "react"
+import { useRef, useState } from "react"
 import { EditorContent, EditorContext, useEditor } from "@tiptap/react"
+import type { Content } from "@tiptap/core"
 import { StarterKit } from "@tiptap/starter-kit"
 import { Image } from "@tiptap/extension-image"
 import { TaskItem, TaskList } from "@tiptap/extension-list"
@@ -85,6 +86,7 @@ export interface SheetSummary {
 export interface EditorCommands {
   addSheet: () => void
   removeCurrentSheet: () => void
+  getContent: () => ReturnType<NonNullable<ReturnType<typeof useEditor>>["getJSON"]>
 }
 
 interface SheetEditorProps {
@@ -94,6 +96,8 @@ interface SheetEditorProps {
   scrollContainerRef?: React.RefObject<HTMLDivElement>
   /** Called once the editor is ready, providing imperative sheet commands */
   onCommandsReady?: (commands: EditorCommands) => void
+  /** Initial document content (ProseMirror JSON). Defaults to INITIAL_CONTENT. */
+  initialContent?: Content
 }
 
 // ---------------------------------------------------------------------------
@@ -258,6 +262,7 @@ export function SheetEditor({
   onSheetsChange,
   scrollContainerRef,
   onCommandsReady,
+  initialContent,
 }: SheetEditorProps) {
   const isMobile = useIsBreakpoint()
   const [mobileView, setMobileView] = useState<"main" | "highlighter" | "link">(
@@ -300,7 +305,7 @@ export function SheetEditor({
         onError: (error) => console.error("Upload failed:", error),
       }),
     ],
-    content: INITIAL_CONTENT,
+    content: initialContent ?? INITIAL_CONTENT,
     onUpdate({ editor: e }) {
       onSheetsChange?.(extractSheets(e.getJSON()))
     },
@@ -309,20 +314,20 @@ export function SheetEditor({
       onCommandsReady?.({
         addSheet: () => e.commands.addSheet(),
         removeCurrentSheet: () => e.commands.removeCurrentSheet(),
+        getContent: () => e.getJSON(),
       })
     },
   })
 
-  useEffect(() => {
-    if (!isMobile && mobileView !== "main") setMobileView("main")
-  }, [isMobile, mobileView])
+  // When returning to desktop, always show the main toolbar — derived, not state.
+  const effectiveMobileView = isMobile ? mobileView : "main"
 
   return (
     <EditorContext.Provider value={{ editor }}>
       {/* The scroll container wraps both toolbar and content so sticky works */}
       <div ref={scrollContainerRef} className="editor-scroll-container">
         <Toolbar ref={toolbarRef}>
-          {mobileView === "main" ? (
+          {effectiveMobileView === "main" ? (
             <MainToolbarContent
               onHighlighterClick={() => setMobileView("highlighter")}
               onLinkClick={() => setMobileView("link")}
@@ -330,7 +335,7 @@ export function SheetEditor({
             />
           ) : (
             <MobileToolbarContent
-              type={mobileView === "highlighter" ? "highlighter" : "link"}
+              type={effectiveMobileView === "highlighter" ? "highlighter" : "link"}
               onBack={() => setMobileView("main")}
             />
           )}
