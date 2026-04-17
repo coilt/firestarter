@@ -60,6 +60,14 @@ export interface PenpotProfile {
   fullname: string
 }
 
+export interface PenpotComponent {
+  id: string
+  name: string
+  path: string                   // folder prefix, e.g. "Benchmark" for "Benchmark/Hero"
+  mainInstanceId?: string    // UUID of the main component frame in the page
+  mainInstancePage?: string  // UUID of the page where the main component lives
+}
+
 export interface PenpotFile {
   id: string
   name: string
@@ -69,6 +77,7 @@ export interface PenpotFile {
     id: string
     pages: string[]           // ordered page UUIDs
     pagesIndex: Record<string, PenpotPage>
+    components?: Record<string, PenpotComponent>   // present in library files
   }
 }
 

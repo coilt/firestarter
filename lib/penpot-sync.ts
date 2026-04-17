@@ -113,7 +113,14 @@ function shapeGeometry(x: number, y: number, w: number, h: number) {
   }
 }
 
-function buildFrameChanges(pageId: string, sheets: SheetData[]): ChangeOp[] {
+function buildNewFrameChanges(pageId: string, sheets: SheetData[]): ChangeOp[]
+function buildNewFrameChanges(pageId: string, sheet: SheetData): ChangeOp[]
+function buildNewFrameChanges(pageId: string, sheetsOrSheet: SheetData | SheetData[]): ChangeOp[] {
+  const sheets = Array.isArray(sheetsOrSheet) ? sheetsOrSheet : [sheetsOrSheet]
+  return _buildFrameChanges(pageId, sheets)
+}
+
+function _buildFrameChanges(pageId: string, sheets: SheetData[]): ChangeOp[] {
   const changes: ChangeOp[] = []
 
   for (const sheet of sheets) {
@@ -226,15 +233,66 @@ function buildTextContent(title: string, body: string) {
   }
 }
 
-/** Delete all frames whose name starts with FRAME_NAME_PREFIX. */
-function buildDeleteChanges(page: { id: string; objects: Record<string, { name?: string; type?: string }> }): ChangeOp[] {
-  return Object.values(page.objects)
-    .filter((obj) => obj.type === "frame" && obj.name?.startsWith(FRAME_NAME_PREFIX))
-    .map((obj) => ({
-      type: "del-obj" as const,
-      id: (obj as { id: string }).id,
-      "page-id": page.id,
-    }))
+/**
+ * Build a minimal diff between current editor sheets and existing Penpot objects.
+ *
+ * Rules:
+ *   - Frame exists for this sheet index → only update the "content" text object
+ *     (preserves designer changes to layout, colours, position, etc.)
+ *   - No frame yet → add frame + text (new sheet)
+ *   - Frame exists but sheet was removed → delete the frame
+ */
+function buildSyncChanges(
+  pageId: string,
+  page: { id: string; objects: Record<string, { id: string; name?: string; type?: string; parentId?: string }> },
+  sheets: SheetData[]
+): ChangeOp[] {
+  const changes: ChangeOp[] = []
+
+  // Index our frames by sheet index
+  const existingFrames = new Map<number, { id: string; name: string }>()
+  for (const obj of Object.values(page.objects)) {
+    if (obj.type === "frame" && obj.name?.startsWith(FRAME_NAME_PREFIX)) {
+      const idx = parseInt(obj.name.slice(FRAME_NAME_PREFIX.length), 10)
+      if (!isNaN(idx)) existingFrames.set(idx, obj as { id: string; name: string })
+    }
+  }
+
+  const handledIndices = new Set<number>()
+
+  for (const sheet of sheets) {
+    const frame = existingFrames.get(sheet.index)
+
+    if (frame) {
+      // Frame already exists — find its "content" child and update only the text
+      handledIndices.add(sheet.index)
+      const contentObj = Object.values(page.objects).find(
+        (o) => o.parentId === frame.id && o.name === "content"
+      )
+      if (contentObj) {
+        changes.push({
+          type: "mod-obj",
+          id: contentObj.id,
+          "page-id": pageId,
+          operations: [
+            { type: "set", attr: "content", val: buildTextContent(sheet.title, sheet.body) },
+          ],
+        })
+      }
+    } else {
+      // New sheet — add frame + text
+      changes.push(...buildNewFrameChanges(pageId, sheet))
+    }
+  }
+
+  // Delete frames whose sheet no longer exists
+  for (const [idx, frame] of existingFrames) {
+    if (!handledIndices.has(idx)) {
+      changes.push({ type: "del-obj", id: frame.id, "page-id": pageId })
+    }
+  }
+
+  return changes
 }
 
 // ---------------------------------------------------------------------------
@@ -298,12 +356,14 @@ export async function syncToPenpot(doc: SyncableDocument): Promise<void> {
 
     const sessionId = randomUUID()
     const sheets = extractSheets(doc.content as TipTapNode)
-    const deleteChanges = existingPage ? buildDeleteChanges(existingPage) : []
-    const addChanges = buildFrameChanges(pageId, sheets)
 
-    if (deleteChanges.length === 0 && addChanges.length === 0) return
+    const changes = existingPage
+      ? buildSyncChanges(pageId, existingPage, sheets)   // smart diff — preserves designer work
+      : buildNewFrameChanges(pageId, sheets)             // first sync — add all frames fresh
 
-    await updateFile(fileId, revn, vern, sessionId, [...deleteChanges, ...addChanges])
+    if (changes.length === 0) return
+
+    await updateFile(fileId, revn, vern, sessionId, changes)
   } catch (err) {
     // Log but don't surface — sync failure must never break the save response
     console.error("[penpot-sync] failed:", err)
