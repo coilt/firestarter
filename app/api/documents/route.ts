@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server"
 import { prisma } from "@/lib/db"
 import { getProfile, getTeamProjects, createProject, createFile } from "@/lib/penpot"
-import { syncToPenpot } from "@/lib/penpot-sync"
+import { syncNewFile } from "@/lib/penpot-sync"
 
 export async function GET() {
   const documents = await prisma.document.findMany({
@@ -59,14 +59,20 @@ export async function POST(request: Request) {
       if (projectId) {
         const penpotFile = await createFile(projectId, document.title)
 
-        // Store the Penpot file ID so syncToPenpot uses it on the getFile path
+        // Store penpotFileId
         const withPenpotId = await prisma.document.update({
           where: { id: document.id },
           data: { penpotFileId: penpotFile.id },
         })
 
-        // Sync initial content so the Penpot file isn't empty
-        await syncToPenpot(withPenpotId)
+        // Sync initial frames using the revn/pageId already in hand — no extra getFile
+        await syncNewFile(
+          penpotFile.id,
+          penpotFile.revn,
+          penpotFile.vern ?? 0,
+          penpotFile.data.pages[0],
+          body.content,
+        )
 
         return NextResponse.json(withPenpotId, { status: 201 })
       }

@@ -3,6 +3,9 @@
     "allow": [
       "Bash(pnpm build *)",
       "Bash(pnpm prisma:generate)"
+    ],
+    "additionalDirectories": [
+      "e:\\prog\\firestarter\\app\\api\\penpot\\templates"
     ]
   }
 }

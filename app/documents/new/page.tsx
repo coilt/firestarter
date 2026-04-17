@@ -1,5 +1,5 @@
-import { EditorLayout } from "@/components/editor/editor-layout"
+import { NewDocumentFlow } from "@/components/dashboard/new-document-flow"
 
 export default function NewDocumentPage() {
-  return <EditorLayout />
+  return <NewDocumentFlow />
 }

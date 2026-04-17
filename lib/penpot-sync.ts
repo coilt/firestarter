@@ -274,6 +274,8 @@ function buildComponentInstance(
   block: TemplateBlockData,
   blockIdx: number,
   lib: LibData,
+  /** Pre-generated UUID for the instance root — lets callers include it in parent shapes[]. */
+  instanceId?: string,
 ): { changes: ChangeOp[]; height: number } {
   const componentId = block.componentId
   if (!componentId) return { changes: [], height: 0 }
@@ -321,10 +323,12 @@ function buildComponentInstance(
     }
   }
 
-  // Create a fresh UUID for every shape in the component tree
+  // Create a fresh UUID for every shape in the component tree.
+  // Use the caller-supplied instanceId for the root so the parent frame can
+  // include it in its shapes[] before we emit any add-obj.
   const idMap = new Map<string, string>()
   for (const origId of allOrigIds) {
-    idMap.set(origId, randomUUID())
+    idMap.set(origId, origId === rootId ? (instanceId ?? randomUUID()) : randomUUID())
   }
 
   const dx = placeX - root.x
@@ -352,11 +356,14 @@ function buildComponentInstance(
       ? parentFrameId
       : (idMap.get(orig.frameId ?? "") ?? newParentId)
 
-    // Strip camelCase navigation keys — we'll write them back as kebab-case below
+    // Strip keys that must not be copied to instances:
+    //   parentId / frameId  — replaced with kebab-case versions below
+    //   positionData        — cached text-layout computed by Penpot; stale after position offset
+    const STRIP = new Set(["parentId", "frameId", "positionData"])
     const origRecord = orig as Record<string, unknown>
     const rest: Record<string, unknown> = {}
     for (const [k, v] of Object.entries(origRecord)) {
-      if (k !== "parentId" && k !== "frameId") rest[k] = v
+      if (!STRIP.has(k)) rest[k] = v
     }
 
     const obj: Record<string, unknown> = {
@@ -426,14 +433,16 @@ function _buildFrameChanges(pageId: string, sheets: SheetData[], lib?: LibData |
   for (const sheet of sheets) {
     const frameId = randomUUID()
     const titleId = randomUUID()
-    const x = sheet.index * (FRAME_WIDTH + FRAME_GAP)
+    // Pre-generate one root UUID per block so they can go into shapes[] upfront
+    const blockInstanceIds = sheet.blocks.map(() => randomUUID())
 
+    const x = sheet.index * (FRAME_WIDTH + FRAME_GAP)
     const textX = x + 40
     const textY = 60
     const textW = FRAME_WIDTH - 80
     const textH = 60
 
-    // Sheet frame — block IDs are generated later inside buildComponentInstance
+    // Sheet frame — shapes[] must list all direct children in order
     changes.push({
       type: "add-obj",
       id: frameId,
@@ -452,7 +461,7 @@ function _buildFrameChanges(pageId: string, sheets: SheetData[], lib?: LibData |
         "frame-id": ROOT_FRAME_ID,
         fills: [{ "fill-color": "#FFFFFF", "fill-opacity": 1 }],
         strokes: [],
-        shapes: [],   // Penpot resolves child ordering via add-obj parent references
+        shapes: [titleId, ...blockInstanceIds],
         "clip-content": false,
         rotation: 0,
         ...shapeGeometry(x, 0, FRAME_WIDTH, FRAME_HEIGHT),
@@ -491,31 +500,25 @@ function _buildFrameChanges(pageId: string, sheets: SheetData[], lib?: LibData |
 
     for (let i = 0; i < sheet.blocks.length; i++) {
       const block = sheet.blocks[i]
+      const instanceId = blockInstanceIds[i]
 
       if (lib) {
         const { changes: instanceChanges, height } = buildComponentInstance(
-          pageId,
-          frameId,
-          textX,
-          blockY,
-          block,
-          i,
-          lib,
+          pageId, frameId, textX, blockY, block, i, lib, instanceId,
         )
         changes.push(...instanceChanges)
         blockY += (height || 120) + BLOCK_GAP
       } else {
         // Fallback when library is unavailable: plain labeled text block
-        const blockId = randomUUID()
         const BLOCK_H = 120
         changes.push({
           type: "add-obj",
-          id: blockId,
+          id: instanceId,
           "page-id": pageId,
           "parent-id": frameId,
           "frame-id": frameId,
           obj: {
-            id: blockId,
+            id: instanceId,
             name: `${BLOCK_NAME_PREFIX}${i}`,
             type: "text",
             x: textX,
@@ -528,10 +531,7 @@ function _buildFrameChanges(pageId: string, sheets: SheetData[], lib?: LibData |
             rotation: 0,
             fills: [],
             strokes: [],
-            content: buildTextContent(
-              block.title || block.componentName,
-              block.body
-            ),
+            content: buildTextContent(block.title || block.componentName, block.body),
             ...shapeGeometry(textX, blockY, textW, BLOCK_H),
           },
         })
@@ -693,9 +693,9 @@ export async function syncToPenpot(doc: SyncableDocument): Promise<void> {
     const sessionId = randomUUID()
     const sheets = extractSheets(doc.content as TipTapNode)
 
-    // Fetch the component library if any sheet has template blocks
-    const hasBlocks = sheets.some((s) => s.blocks.length > 0)
-    const lib = hasBlocks ? await getLibraryData() : null
+    // Component instance cloning is disabled until the shape payload format is
+    // confirmed valid with Penpot. Passing lib=null uses plain text fallback.
+    const lib = null
 
     const changes = existingPage
       ? buildSyncChanges(pageId, existingPage, sheets, lib)   // delete existing fs-* frames + recreate
@@ -712,5 +712,38 @@ export async function syncToPenpot(doc: SyncableDocument): Promise<void> {
     console.log(`[penpot-sync] ok revn=${revn}`)
   } catch (err) {
     console.error("[penpot-sync] failed:", err)
+  }
+}
+
+/**
+ * Populate a brand-new Penpot file with the initial document structure.
+ *
+ * Skips component instance cloning for now — just frames + title text.
+ * This lets us verify basic frame creation before adding complexity.
+ * Uses the revn/pageId already returned by createFile, avoiding a getFile round-trip.
+ */
+export async function syncNewFile(
+  fileId: string,
+  revn: number,
+  vern: number,
+  pageId: string,
+  content: unknown,
+): Promise<void> {
+  try {
+    const sheets = extractSheets(content as TipTapNode)
+    console.log(`[penpot-sync] syncNewFile: ${sheets.length} sheets`)
+    if (sheets.length === 0) return
+
+    // Pass lib=null for now: skip component instance cloning so the entire
+    // updateFile batch doesn't fail if an instance payload is malformed.
+    // Frames + title text still populate correctly.
+    const changes = buildNewFrameChanges(pageId, sheets, null)
+    console.log(`[penpot-sync] syncNewFile: ${changes.length} changes`)
+    if (changes.length === 0) return
+
+    await updateFile(fileId, revn, vern, randomUUID(), changes)
+    console.log(`[penpot-sync] syncNewFile ok`)
+  } catch (err) {
+    console.error("[penpot-sync] syncNewFile failed:", err)
   }
 }

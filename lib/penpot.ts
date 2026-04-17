@@ -104,6 +104,15 @@ export interface PenpotObject {
   height: number
   parentId?: string
   frameId?: string
+  // Set on component instances
+  componentId?: string
+  componentFile?: string
+  componentRoot?: boolean
+}
+
+export interface PenpotFileSummary {
+  id: string
+  name: string
 }
 
 /** A single change operation sent in update-file. */
@@ -199,6 +208,11 @@ export function updateFile(
     "session-id": sessionId,
     changes,
   })
+}
+
+/** List all files in a project (summaries only, no page data). */
+export function getProjectFiles(projectId: string) {
+  return post<PenpotFileSummary[]>("get-project-files", { "project-id": projectId })
 }
 
 /** Delete a file. Non-fatal if the file no longer exists. */
