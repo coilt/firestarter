@@ -33,7 +33,8 @@ async function post<T>(command: string, body: Record<string, unknown>): Promise<
     const text = await res.text()
     throw new Error(`Penpot POST /${command} → ${res.status}: ${text}`)
   }
-  return res.json() as Promise<T>
+  const text = await res.text()
+  return (text ? JSON.parse(text) : undefined) as T
 }
 
 async function get<T>(command: string, params: Record<string, string> = {}): Promise<T> {
@@ -136,6 +137,18 @@ export type ChangeOp =
       id: string
       "page-id": string
     }
+  | {
+      type: "add-component"
+      id: string
+      name: string
+      path: string
+      "main-instance-id": string
+      "main-instance-page": string
+    }
+  | {
+      type: "del-component"
+      id: string
+    }
 
 // ---------------------------------------------------------------------------
 // API calls
@@ -206,7 +219,24 @@ export function updateFile(
     revn,
     vern,
     "session-id": sessionId,
+    features: SUPPORTED_FEATURES,
     changes,
+  })
+}
+
+/** Mark a file as a shared library so other files can link to it. */
+export function setFileShared(fileId: string) {
+  return post<void>("set-file-shared", {
+    id: fileId,
+    "is-shared": true,
+  })
+}
+
+/** Link an external shared library file to a file so component references are valid. */
+export function linkFileToLibrary(fileId: string, libraryId: string) {
+  return post<void>("link-file-to-library", {
+    "file-id": fileId,
+    "library-id": libraryId,
   })
 }
 

@@ -17,6 +17,8 @@ import {
   createFile,
   getFile,
   updateFile,
+  setFileShared,
+  linkFileToLibrary,
   ROOT_FRAME_ID,
   type ChangeOp,
   type PenpotComponent,
@@ -33,6 +35,26 @@ function isPenpotConfigured() {
 }
 
 // ---------------------------------------------------------------------------
+// Per-document sync lock — prevents concurrent saves from racing on revn
+// Stored on globalThis so it survives Next.js hot reloads.
+// ---------------------------------------------------------------------------
+
+const g = globalThis as { __penpotSyncLocks?: Map<string, Promise<void>> }
+if (!g.__penpotSyncLocks) g.__penpotSyncLocks = new Map()
+const _syncLocks = g.__penpotSyncLocks
+
+function withSyncLock<T>(docId: string, fn: () => Promise<T>): Promise<T> {
+  const prev = _syncLocks.get(docId) ?? Promise.resolve()
+  let release!: () => void
+  const next = new Promise<void>((res) => { release = res })
+  _syncLocks.set(docId, next)
+  return prev.then(() => fn()).finally(() => {
+    release()
+    if (_syncLocks.get(docId) === next) _syncLocks.delete(docId)
+  }) as Promise<T>
+}
+
+// ---------------------------------------------------------------------------
 // Library file cache (5-minute TTL — avoids re-fetching on every save)
 // ---------------------------------------------------------------------------
 
@@ -43,7 +65,7 @@ interface LibData {
 }
 
 let _libCache: { data: LibData; ts: number } | null = null
-const LIB_CACHE_TTL_MS = 5 * 60 * 1000
+const LIB_CACHE_TTL_MS = 30 * 1000  // 30s — short during active development
 
 async function getLibraryData(): Promise<LibData | null> {
   const fileId = process.env.PENPOT_LIBRARY_FILE_ID
@@ -232,23 +254,41 @@ function buildTextContent(title: string, body: string) {
   }
 }
 
-/** Build a minimal text content with a single paragraph for slot overrides. */
-function buildSlotTextContent(text: string) {
-  return {
-    type: "root",
-    children: [
-      {
-        type: "paragraph-set",
-        children: [
-          {
-            type: "paragraph",
-            fills: [],
-            children: [{ text }],
-          },
-        ],
-      },
-    ],
+/**
+ * Deep-clone a Penpot text content tree, replacing every text leaf's value
+ * with `newText`. Preserves all font/fill/style properties on the leaves.
+ * Falls back to a minimal structure if the original is missing.
+ */
+function patchTextContent(original: unknown, newText: string): unknown {
+  function patch(node: unknown): unknown {
+    if (Array.isArray(node)) return node.map(patch)
+    if (typeof node !== "object" || node === null) return node
+    const n = node as Record<string, unknown>
+    // Text leaf: replace value, keep all other style props
+    if ("text" in n) return { ...n, text: newText }
+    // Interior node: recurse into children
+    const out: Record<string, unknown> = {}
+    for (const [k, v] of Object.entries(n)) {
+      out[k] = patch(v)
+    }
+    return out
   }
+
+  if (!original || typeof original !== "object") {
+    // Fallback — no original content available
+    return {
+      type: "root",
+      children: [{
+        type: "paragraph-set",
+        children: [{
+          type: "paragraph",
+          fills: [],
+          children: [{ text: newText, "fill-color": "#000000", "fill-opacity": 1, "font-size": "16", "font-weight": "400" }],
+        }],
+      }],
+    }
+  }
+  return patch(original)
 }
 
 // ---------------------------------------------------------------------------
@@ -283,7 +323,8 @@ function buildComponentInstance(
   // Look up the component definition to get the main instance location
   const component = lib.components[componentId]
   if (!component) {
-    console.warn(`[penpot-sync] component ${componentId} not found in library`)
+    console.warn(`[penpot-sync] component ${componentId} not found in library — invalidating cache`)
+    _libCache = null  // force re-fetch on next sync
     return { changes: [], height: 0 }
   }
 
@@ -303,7 +344,7 @@ function buildComponentInstance(
   const root = libPageObjects[rootId]
   if (!root) return { changes: [], height: 0 }
 
-  // BFS: collect all shapes that belong to this component instance
+  // BFS: collect all shapes in the component tree
   const childrenMap = new Map<string, string[]>()
   for (const obj of Object.values(libPageObjects)) {
     const pid = obj.parentId
@@ -318,24 +359,31 @@ function buildComponentInstance(
   while (bfsQueue.length) {
     const id = bfsQueue.shift()!
     allOrigIds.push(id)
-    for (const childId of childrenMap.get(id) ?? []) {
-      bfsQueue.push(childId)
-    }
+    for (const childId of childrenMap.get(id) ?? []) bfsQueue.push(childId)
   }
 
-  // Create a fresh UUID for every shape in the component tree.
-  // Use the caller-supplied instanceId for the root so the parent frame can
-  // include it in its shapes[] before we emit any add-obj.
   const idMap = new Map<string, string>()
   for (const origId of allOrigIds) {
     idMap.set(origId, origId === rootId ? (instanceId ?? randomUUID()) : randomUUID())
   }
 
-  const dx = placeX - root.x
-  const dy = placeY - root.y
+  const dx = placeX - (root.x as number)
+  const dy = placeY - (root.y as number)
+
+  // Strip positioning back-refs and main-component markers — we set those ourselves.
+  // component-id/file and shape-ref are stripped too (set explicitly below).
+  const STRIP_ALWAYS = new Set([
+    "parentId", "frameId", "positionData",
+    "parent-id", "frame-id", "position-data",
+    "componentRoot", "component-root",
+    "mainInstance", "main-instance",
+    "shapeRef", "shape-ref",
+    "componentId", "component-id",
+    "componentFile", "component-file",
+  ])
 
   const slotValues: Record<string, string> = {
-    "fs:title": block.title,
+    "fs:title": block.title || block.componentName,
     "fs:body": block.body,
   }
 
@@ -351,19 +399,13 @@ function buildComponentInstance(
     const newParentId = isRoot
       ? parentFrameId
       : (idMap.get(orig.parentId ?? "") ?? parentFrameId)
-
     const newFrameId = isRoot
       ? parentFrameId
       : (idMap.get(orig.frameId ?? "") ?? newParentId)
 
-    // Strip keys that must not be copied to instances:
-    //   parentId / frameId  — replaced with kebab-case versions below
-    //   positionData        — cached text-layout computed by Penpot; stale after position offset
-    const STRIP = new Set(["parentId", "frameId", "positionData"])
-    const origRecord = orig as Record<string, unknown>
     const rest: Record<string, unknown> = {}
-    for (const [k, v] of Object.entries(origRecord)) {
-      if (!STRIP.has(k)) rest[k] = v
+    for (const [k, v] of Object.entries(orig as Record<string, unknown>)) {
+      if (!STRIP_ALWAYS.has(k)) rest[k] = v
     }
 
     const obj: Record<string, unknown> = {
@@ -373,7 +415,6 @@ function buildComponentInstance(
       y: (orig.y as number) + dy,
       "parent-id": newParentId,
       "frame-id": newFrameId,
-      "shape-ref": origId,
       ...shapeGeometry(
         (orig.x as number) + dx,
         (orig.y as number) + dy,
@@ -382,23 +423,29 @@ function buildComponentInstance(
       ),
     }
 
-    // Remap child shape IDs in frames / groups
+    if (isRoot) {
+      // Nested copy inside a main component: component-id + component-file but
+      // NO component-root:true (root-copy-not-allowed fires if that flag is set
+      // inside another component; component-root is only for page-root-level copies).
+      obj["component-id"] = componentId
+      obj["component-file"] = lib.fileId
+      obj.name = `${BLOCK_NAME_PREFIX}${blockIdx}`
+    } else {
+      // Non-root shapes carry shape-ref → links to the library main instance shape
+      // so Penpot can propagate library updates to this instance.
+      obj["shape-ref"] = origId
+    }
+
     if (Array.isArray(obj.shapes)) {
       obj.shapes = (obj.shapes as string[]).map((id) => idMap.get(id) ?? id)
     }
 
-    if (isRoot) {
-      obj["component-id"] = componentId
-      obj["component-file"] = lib.fileId
-      obj["component-root"] = true
-      obj.name = `${BLOCK_NAME_PREFIX}${blockIdx}`
-    } else {
-      // Override slot text content
+    if (!isRoot) {
       const shapeName = (orig.name as string) ?? ""
-      if (shapeName.startsWith("fs:") && orig.type === "text") {
-        const slotText = slotValues[shapeName]
-        if (slotText !== undefined) {
-          obj.content = buildSlotTextContent(slotText)
+      if (orig.type === "text") {
+        if (shapeName.startsWith("fs:")) {
+          const slotText = slotValues[shapeName]
+          if (slotText) obj.content = patchTextContent(rest.content, slotText)
         }
       }
     }
@@ -420,20 +467,29 @@ function buildComponentInstance(
 // Frame change builders
 // ---------------------------------------------------------------------------
 
-function buildNewFrameChanges(pageId: string, sheets: SheetData[], lib?: LibData | null): ChangeOp[]
-function buildNewFrameChanges(pageId: string, sheet: SheetData, lib?: LibData | null): ChangeOp[]
-function buildNewFrameChanges(pageId: string, sheetsOrSheet: SheetData | SheetData[], lib?: LibData | null): ChangeOp[] {
-  const sheets = Array.isArray(sheetsOrSheet) ? sheetsOrSheet : [sheetsOrSheet]
-  return _buildFrameChanges(pageId, sheets, lib)
+interface FrameChanges {
+  /** Frame + title text — always safe to submit. */
+  base: ChangeOp[]
+  /** Raw shape copies of template blocks — submitted in a second batch so a single bad block doesn't abort all frames. */
+  instances: ChangeOp[]
 }
 
-function _buildFrameChanges(pageId: string, sheets: SheetData[], lib?: LibData | null): ChangeOp[] {
-  const changes: ChangeOp[] = []
+function buildNewFrameChanges(pageId: string, sheets: SheetData[], lib?: LibData | null, fileId?: string): FrameChanges
+function buildNewFrameChanges(pageId: string, sheet: SheetData, lib?: LibData | null, fileId?: string): FrameChanges
+function buildNewFrameChanges(pageId: string, sheetsOrSheet: SheetData | SheetData[], lib?: LibData | null, fileId?: string): FrameChanges {
+  const sheets = Array.isArray(sheetsOrSheet) ? sheetsOrSheet : [sheetsOrSheet]
+  return _buildFrameChanges(pageId, sheets, lib, fileId)
+}
+
+function _buildFrameChanges(pageId: string, sheets: SheetData[], lib?: LibData | null, fileId?: string): FrameChanges {
+  const base: ChangeOp[] = []
+  const instances: ChangeOp[] = []
 
   for (const sheet of sheets) {
     const frameId = randomUUID()
+    const componentDefId = randomUUID()
     const titleId = randomUUID()
-    // Pre-generate one root UUID per block so they can go into shapes[] upfront
+    // Pre-generate one root UUID per block
     const blockInstanceIds = sheet.blocks.map(() => randomUUID())
 
     const x = sheet.index * (FRAME_WIDTH + FRAME_GAP)
@@ -442,8 +498,21 @@ function _buildFrameChanges(pageId: string, sheets: SheetData[], lib?: LibData |
     const textW = FRAME_WIDTH - 80
     const textH = 60
 
-    // Sheet frame — shapes[] must list all direct children in order
-    changes.push({
+    // When fileId is available, register this frame as a main component in the
+    // target file — same pattern Penpot uses internally for "Create component":
+    // the frame self-references its own component definition via component-id +
+    // component-file, plus carries main-instance:true + component-root:true.
+    // This makes it a valid parent for nested component copies from a library.
+    const componentFrameProps = fileId
+      ? {
+          "component-id": componentDefId,
+          "component-file": fileId,
+          "main-instance": true,
+          "component-root": true,
+        }
+      : {}
+
+    base.push({
       type: "add-obj",
       id: frameId,
       "page-id": pageId,
@@ -461,15 +530,16 @@ function _buildFrameChanges(pageId: string, sheets: SheetData[], lib?: LibData |
         "frame-id": ROOT_FRAME_ID,
         fills: [{ "fill-color": "#FFFFFF", "fill-opacity": 1 }],
         strokes: [],
-        shapes: [titleId, ...blockInstanceIds],
+        shapes: [titleId],
         "clip-content": false,
         rotation: 0,
+        ...componentFrameProps,
         ...shapeGeometry(x, 0, FRAME_WIDTH, FRAME_HEIGHT),
       },
     })
 
     // Sheet-level title + body text
-    changes.push({
+    base.push({
       type: "add-obj",
       id: titleId,
       "page-id": pageId,
@@ -494,7 +564,20 @@ function _buildFrameChanges(pageId: string, sheets: SheetData[], lib?: LibData |
       },
     })
 
-    // Component instances for each template block
+    // Register frame as a main component in this file so that nested library
+    // component copies (fsblk:*) are permitted inside it.
+    if (fileId) {
+      base.push({
+        type: "add-component",
+        id: componentDefId,
+        name: `${FRAME_NAME_PREFIX}${sheet.index}`,
+        path: "",
+        "main-instance-id": frameId,
+        "main-instance-page": pageId,
+      })
+    }
+
+    // Library component copies — collected separately for phase-2 submission
     const BLOCK_GAP = 24
     let blockY = textY + textH + BLOCK_GAP
 
@@ -506,12 +589,12 @@ function _buildFrameChanges(pageId: string, sheets: SheetData[], lib?: LibData |
         const { changes: instanceChanges, height } = buildComponentInstance(
           pageId, frameId, textX, blockY, block, i, lib, instanceId,
         )
-        changes.push(...instanceChanges)
+        instances.push(...instanceChanges)
         blockY += (height || 120) + BLOCK_GAP
       } else {
         // Fallback when library is unavailable: plain labeled text block
         const BLOCK_H = 120
-        changes.push({
+        instances.push({
           type: "add-obj",
           id: instanceId,
           "page-id": pageId,
@@ -540,7 +623,7 @@ function _buildFrameChanges(pageId: string, sheets: SheetData[], lib?: LibData |
     }
   }
 
-  return changes
+  return { base, instances }
 }
 
 // ---------------------------------------------------------------------------
@@ -597,14 +680,18 @@ function deleteSubtree(pageId: string, childrenIndex: Map<string, string[]>, roo
  * Simpler and more reliable than mod-obj — avoids Penpot schema validation
  * issues with partial updates. Designers should use "detach" in Penpot if
  * they want to make layout changes that persist across editor saves.
+ *
+ * Deletions are bundled into `base` (must happen before new frames arrive).
  */
 function buildSyncChanges(
   pageId: string,
   page: { id: string; objects: PageObjectsIndex },
   sheets: SheetData[],
   lib?: LibData | null,
-): ChangeOp[] {
-  const changes: ChangeOp[] = []
+  fileComponents?: Record<string, PenpotComponent> | null,
+  fileId?: string,
+): FrameChanges {
+  const deletions: ChangeOp[] = []
 
   const childrenIndex = buildChildrenIndex(page.objects)
 
@@ -616,16 +703,26 @@ function buildSyncChanges(
     }
   }
 
-  // Delete all existing frames (children first)
-  for (const frame of existingFrames) {
-    console.log(`[penpot-sync] removing frame ${frame.name} for recreation`)
-    changes.push(...deleteSubtree(pageId, childrenIndex, frame.id))
+  // Purge existing fs-* component definitions before deleting frames.
+  // del-component must come before del-obj of the main instance frame.
+  if (fileComponents) {
+    for (const compDef of Object.values(fileComponents)) {
+      if (compDef.name?.startsWith(FRAME_NAME_PREFIX)) {
+        deletions.push({ type: "del-component", id: compDef.id })
+      }
+    }
   }
 
-  // Recreate all current sheets fresh
-  changes.push(...buildNewFrameChanges(pageId, sheets, lib))
+  // Delete all existing fs-* frames (children first).
+  for (const frame of existingFrames) {
+    console.log(`[penpot-sync] removing frame ${frame.name} for recreation`)
+    deletions.push(...deleteSubtree(pageId, childrenIndex, frame.id))
+  }
 
-  return changes
+  // New frames: split into base (frames + text + add-component) and instances
+  const { base, instances } = buildNewFrameChanges(pageId, sheets, lib, fileId)
+
+  return { base: [...deletions, ...base], instances }
 }
 
 // ---------------------------------------------------------------------------
@@ -645,7 +742,10 @@ interface SyncableDocument {
  */
 export async function syncToPenpot(doc: SyncableDocument): Promise<void> {
   if (!isPenpotConfigured()) return
+  return withSyncLock(doc.id, () => _syncToPenpot(doc))
+}
 
+async function _syncToPenpot(doc: SyncableDocument): Promise<void> {
   const projectId = process.env.PENPOT_PROJECT_ID!
 
   try {
@@ -654,6 +754,7 @@ export async function syncToPenpot(doc: SyncableDocument): Promise<void> {
     let vern: number
     let pageId: string
     let existingPage: { id: string; objects: PageObjectsIndex } | null = null
+    let existingComponents: Record<string, PenpotComponent> | null = null
 
     if (!fileId) {
       // First sync: create file — response already has revn + page ID
@@ -688,28 +789,48 @@ export async function syncToPenpot(doc: SyncableDocument): Promise<void> {
       if (rawPage) {
         existingPage = { id: rawPage.id, objects: rawPage.objects as PageObjectsIndex }
       }
+      existingComponents = file.data.components ?? null
     }
 
-    const sessionId = randomUUID()
     const sheets = extractSheets(doc.content as TipTapNode)
 
-    // Component instance cloning is disabled until the shape payload format is
-    // confirmed valid with Penpot. Passing lib=null uses plain text fallback.
-    const lib = null
+    const hasBlocks = sheets.some((s) => s.blocks.length > 0)
+    const lib = hasBlocks ? await getLibraryData() : null
 
-    const changes = existingPage
-      ? buildSyncChanges(pageId, existingPage, sheets, lib)   // delete existing fs-* frames + recreate
-      : buildNewFrameChanges(pageId, sheets, lib)              // first sync — add all frames fresh
+    const { base, instances } = existingPage
+      ? buildSyncChanges(pageId, existingPage, sheets, lib, existingComponents, fileId!)
+      : buildNewFrameChanges(pageId, sheets, lib, fileId!)
 
     console.log(
-      `[penpot-sync] doc=${doc.id.slice(0, 8)} sheets=${sheets.length} changes=${changes.length}`,
-      changes.map((c) => `${c.type}:${c.id.slice(0, 8)}`).join(" "),
+      `[penpot-sync] doc=${doc.id.slice(0, 8)} sheets=${sheets.length} base=${base.length} instances=${instances.length}`,
     )
 
-    if (changes.length === 0) return
+    if (base.length === 0 && instances.length === 0) return
 
-    await updateFile(fileId, revn, vern, sessionId, changes)
-    console.log(`[penpot-sync] ok revn=${revn}`)
+    // Phase 1: frames + text + add-component registrations + deletions (must succeed)
+    let currentRevn = revn
+    if (base.length > 0) {
+      const result = await updateFile(fileId!, currentRevn, vern, randomUUID(), base)
+      currentRevn = result.revn
+      console.log(`[penpot-sync] phase 1 ok revn=${currentRevn}`)
+    }
+
+    // Phase 2: library component instances (isolated — failure doesn't break frames)
+    if (instances.length > 0 && lib) {
+      // Ensure the library file is shared and linked to the target file before
+      // placing component instances that reference it.
+      await setFileShared(lib.fileId)
+        .catch((err) => {
+          if (!String(err).includes("invalid-shared-state"))
+            console.warn("[penpot-sync] setFileShared failed (continuing):", String(err).slice(0, 200))
+        })
+      await linkFileToLibrary(fileId!, lib.fileId)
+        .catch((err) => console.warn("[penpot-sync] linkFileToLibrary failed (continuing):", String(err).slice(0, 200)))
+
+      await updateFile(fileId!, currentRevn, vern, randomUUID(), instances)
+        .then((r) => console.log(`[penpot-sync] phase 2 ok revn=${r.revn}`))
+        .catch((err) => console.error("[penpot-sync] phase 2 FAILED:", String(err).slice(0, 800)))
+    }
   } catch (err) {
     console.error("[penpot-sync] failed:", err)
   }
@@ -718,8 +839,10 @@ export async function syncToPenpot(doc: SyncableDocument): Promise<void> {
 /**
  * Populate a brand-new Penpot file with the initial document structure.
  *
- * Skips component instance cloning for now — just frames + title text.
- * This lets us verify basic frame creation before adding complexity.
+ * Two-phase approach:
+ *   Phase 1 — frames + title text (guaranteed safe)
+ *   Phase 2 — component instances (isolated; failure doesn't break frames)
+ *
  * Uses the revn/pageId already returned by createFile, avoiding a getFile round-trip.
  */
 export async function syncNewFile(
@@ -734,15 +857,30 @@ export async function syncNewFile(
     console.log(`[penpot-sync] syncNewFile: ${sheets.length} sheets`)
     if (sheets.length === 0) return
 
-    // Pass lib=null for now: skip component instance cloning so the entire
-    // updateFile batch doesn't fail if an instance payload is malformed.
-    // Frames + title text still populate correctly.
-    const changes = buildNewFrameChanges(pageId, sheets, null)
-    console.log(`[penpot-sync] syncNewFile: ${changes.length} changes`)
-    if (changes.length === 0) return
+    const hasBlocks = sheets.some((s) => s.blocks.length > 0)
+    const lib = hasBlocks ? await getLibraryData() : null
+    const { base, instances } = buildNewFrameChanges(pageId, sheets, lib, fileId)
+    console.log(`[penpot-sync] syncNewFile: base=${base.length} instances=${instances.length}`)
 
-    await updateFile(fileId, revn, vern, randomUUID(), changes)
-    console.log(`[penpot-sync] syncNewFile ok`)
+    if (base.length === 0 && instances.length === 0) return
+
+    // Phase 1: frames + text
+    let currentRevn = revn
+    if (base.length > 0) {
+      const result = await updateFile(fileId, currentRevn, vern, randomUUID(), base)
+      currentRevn = result.revn
+      console.log(`[penpot-sync] syncNewFile phase 1 ok revn=${currentRevn}`)
+    }
+
+    // Phase 2: library component instances (isolated failure)
+    if (instances.length > 0 && lib) {
+      await linkFileToLibrary(fileId, lib.fileId)
+        .catch((err) => console.warn("[penpot-sync] syncNewFile linkFileToLibrary failed (continuing):", String(err).slice(0, 200)))
+
+      await updateFile(fileId, currentRevn, vern, randomUUID(), instances)
+        .then((r) => console.log(`[penpot-sync] syncNewFile phase 2 ok revn=${r.revn}`))
+        .catch((err) => console.error("[penpot-sync] syncNewFile phase 2 FAILED:", String(err).slice(0, 800)))
+    }
   } catch (err) {
     console.error("[penpot-sync] syncNewFile failed:", err)
   }
