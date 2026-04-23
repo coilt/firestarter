@@ -1,4 +1,6 @@
 import { Node, mergeAttributes } from "@tiptap/core"
+import { ReactNodeViewRenderer } from "@tiptap/react"
+import { TemplateBlockNodeView } from "./template-block-node-view"
 
 export interface TemplateBlockAttrs {
   componentId: string
@@ -62,6 +64,10 @@ export const TemplateBlock = Node.create({
       }),
       0,
     ]
+  },
+
+  addNodeView() {
+    return ReactNodeViewRenderer(TemplateBlockNodeView)
   },
 
   addCommands() {

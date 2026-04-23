@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(curl -s \"http://localhost:3001/api/penpot/components/a260159f-4bee-80ed-8007-e2b58c9f17e2/preview\")",
+      "Bash(python3 -c ' *)",
+      "Read(//tmp/**)",
+      "Bash(curl -s \"http://localhost:3000/api/penpot/components/a260159f-4bee-80ed-8007-e2b598e904f2/preview\")",
+      "Bash(npx tsc *)",
+      "Bash(curl -s \"http://localhost:3000/api/penpot/components/a260159f-4bee-80ed-8007-e2b58c9f17e2/debug\")",
+      "Bash(python3 -m json.tool)",
+      "Bash(curl -s \"http://localhost:3000/api/penpot/components/a260159f-4bee-80ed-8007-e2b598e904f2/debug\")"
+    ]
+  }
+}

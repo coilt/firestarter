@@ -416,10 +416,10 @@ function buildComponentInstance(
       "parent-id": newParentId,
       "frame-id": newFrameId,
       ...shapeGeometry(
-        (orig.x as number) + dx,
-        (orig.y as number) + dy,
-        orig.width as number,
-        orig.height as number,
+        ((orig.x as number) || 0) + dx,
+        ((orig.y as number) || 0) + dy,
+        Math.max((orig.width as number) || 0, 1),
+        Math.max((orig.height as number) || 0, 1),
       ),
     }
 

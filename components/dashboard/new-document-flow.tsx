@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { useRouter } from "next/navigation"
 import { DocumentPlusIcon } from "@heroicons/react/24/outline"
 import { ArrowLeftIcon } from "@heroicons/react/20/solid"
@@ -44,26 +44,46 @@ function TemplateCard({
   icon,
   name,
   description,
+  thumbnailUrl,
   loading,
   onClick,
 }: {
   icon: React.ReactNode
   name: string
   description: string
+  thumbnailUrl?: string
   loading?: boolean
   onClick: () => void
 }) {
+  const [imgFailed, setImgFailed] = useState(false)
+  const showThumbnail = thumbnailUrl && !imgFailed
+
   return (
     <button
       type="button"
       onClick={onClick}
       disabled={loading}
-      className="cursor-pointer group relative flex flex-col gap-4 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 p-6 text-left shadow-sm hover:border-zinc-400 dark:hover:border-zinc-500 hover:shadow-md transition-all disabled:opacity-50 disabled:cursor-wait"
+      className="cursor-pointer group relative flex flex-col rounded-xl border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-left shadow-sm hover:border-zinc-400 dark:hover:border-zinc-500 hover:shadow-md transition-all disabled:opacity-50 disabled:cursor-wait overflow-hidden"
     >
-      <div className="flex size-10 items-center justify-center rounded-lg bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400 group-hover:bg-zinc-200 dark:group-hover:bg-zinc-700 transition-colors">
-        {icon}
+      {/* Preview area */}
+      <div className="relative w-full aspect-4/3 bg-zinc-100 dark:bg-zinc-800 overflow-hidden">
+        {showThumbnail ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img
+            src={thumbnailUrl}
+            alt={name}
+            onError={() => setImgFailed(true)}
+            className="w-full h-full object-cover object-top"
+          />
+        ) : (
+          <div className="flex h-full items-center justify-center text-zinc-400 dark:text-zinc-600">
+            {icon}
+          </div>
+        )}
       </div>
-      <div>
+
+      {/* Label */}
+      <div className="px-4 py-3">
         <p className="text-sm font-semibold text-zinc-900 dark:text-white">
           {loading ? "Loading…" : name}
         </p>
@@ -72,6 +92,85 @@ function TemplateCard({
         </p>
       </div>
     </button>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Template card with thumbnail upload
+// ---------------------------------------------------------------------------
+
+function TemplateCardWithUpload({
+  tmpl,
+  loading,
+  editMode,
+  onPick,
+}: {
+  tmpl: { id: string; name: string }
+  loading: boolean
+  editMode: boolean
+  onPick: () => void
+}) {
+  const [thumbKey, setThumbKey] = useState(0)
+  const [uploading, setUploading] = useState(false)
+  const inputRef = useRef<HTMLInputElement>(null)
+  const thumbnailUrl = `/api/penpot/templates/${tmpl.id}/thumbnail?v=${thumbKey}`
+
+  async function handleUpload(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0]
+    if (!file) return
+    setUploading(true)
+    const form = new FormData()
+    form.append("thumbnail", file)
+    await fetch(`/api/penpot/templates/${tmpl.id}/thumbnail`, { method: "POST", body: form })
+    setThumbKey((k) => k + 1)
+    setUploading(false)
+  }
+
+  return (
+    <div className="group relative flex flex-col rounded-xl border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 shadow-sm hover:border-zinc-400 dark:hover:border-zinc-500 hover:shadow-md transition-all overflow-hidden">
+      {/* Clickable preview area */}
+      <button
+        type="button"
+        onClick={onPick}
+        disabled={loading}
+        className="cursor-pointer w-full text-left disabled:opacity-50 disabled:cursor-wait"
+      >
+        <div className="relative w-full aspect-4/3 bg-zinc-100 dark:bg-zinc-800 overflow-hidden">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            key={thumbKey}
+            src={thumbnailUrl}
+            alt={tmpl.name}
+            onError={(e) => { (e.target as HTMLImageElement).style.display = "none" }}
+            className="w-full h-full object-cover object-top"
+          />
+          {/* Upload overlay — only in edit mode */}
+          {editMode && (
+            <div
+              onClick={(e) => { e.stopPropagation(); inputRef.current?.click() }}
+              className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity bg-black/40 cursor-pointer"
+            >
+              <span className="text-xs font-semibold text-white bg-black/60 rounded-md px-2 py-1">
+                {uploading ? "Uploading…" : "Upload thumbnail"}
+              </span>
+            </div>
+          )}
+        </div>
+        <div className="px-4 py-3">
+          <p className="text-sm font-semibold text-zinc-900 dark:text-white">
+            {loading ? "Loading…" : tmpl.name}
+          </p>
+          <p className="mt-0.5 text-xs text-zinc-500 dark:text-zinc-400">Penpot template</p>
+        </div>
+      </button>
+      <input
+        ref={inputRef}
+        type="file"
+        accept="image/*"
+        className="hidden"
+        onChange={handleUpload}
+      />
+    </div>
   )
 }
 
@@ -87,6 +186,7 @@ function TemplatePicker({
   const [templates, setTemplates] = useState<Template[]>([])
   const [loading, setLoading] = useState(true)
   const [fetching, setFetching] = useState<string | null>(null)
+  const [editMode, setEditMode] = useState(false)
 
   useEffect(() => {
     fetch("/api/penpot/templates")
@@ -143,10 +243,17 @@ function TemplatePicker({
           />
         </div>
 
-        <div className="mb-3">
+        <div className="mb-3 flex items-center justify-between">
           <h2 className="text-xs font-semibold uppercase tracking-wider text-zinc-400 dark:text-zinc-500">
             Templates
           </h2>
+          <button
+            type="button"
+            onClick={() => setEditMode((v) => !v)}
+            className="text-xs text-zinc-400 dark:text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300 transition-colors"
+          >
+            {editMode ? "Done" : "Edit thumbnails"}
+          </button>
         </div>
 
         {loading ? (
@@ -165,17 +272,12 @@ function TemplatePicker({
         ) : (
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
             {templates.map((tmpl) => (
-              <TemplateCard
+              <TemplateCardWithUpload
                 key={tmpl.id}
-                icon={
-                  <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" className="size-5">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                  </svg>
-                }
-                name={tmpl.name}
-                description="Penpot template"
+                tmpl={tmpl}
                 loading={fetching === tmpl.id}
-                onClick={() => pickTemplate(tmpl)}
+                editMode={editMode}
+                onPick={() => pickTemplate(tmpl)}
               />
             ))}
           </div>

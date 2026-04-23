@@ -1,20 +1,87 @@
 .template-block-node {
   position: relative;
-  margin: 1rem 0;
-  padding: 0.75rem 1rem;
+  margin: 1.5rem 0;
   border-left: 3px solid var(--tt-brand-color-500, #ef382d);
-  border-radius: 0 4px 4px 0;
-  background: color-mix(in srgb, var(--tt-brand-color-500, #ef382d) 5%, transparent);
+  border-radius: 0 6px 6px 0;
+  background: color-mix(in srgb, var(--tt-brand-color-500, #ef382d) 4%, transparent);
+}
 
-  &::before {
-    content: attr(data-component-name);
-    display: block;
-    font-size: 0.65rem;
-    font-weight: 700;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    color: var(--tt-brand-color-500, #ef382d);
-    margin-bottom: 0.5rem;
-    opacity: 0.8;
+.template-block-inner {
+  display: flex;
+  flex-direction: column;
+}
+
+.template-block-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.5rem 0.75rem;
+}
+
+.template-block-label {
+  font-size: 0.6rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--tt-brand-color-500, #ef382d);
+  opacity: 0.8;
+}
+
+.template-block-toggle {
+  font-size: 0.65rem;
+  font-weight: 600;
+  color: var(--tt-brand-color-500, #ef382d);
+  opacity: 0.6;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 0.1rem 0.3rem;
+  border-radius: 3px;
+  transition: opacity 0.15s;
+  white-space: nowrap;
+  user-select: none;
+
+  &:hover {
+    opacity: 1;
+    background: color-mix(in srgb, var(--tt-brand-color-500, #ef382d) 10%, transparent);
+  }
+}
+
+.template-block-canvas {
+  margin: 0 0.75rem;
+  border-radius: 4px;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--tt-brand-color-500, #ef382d) 15%, transparent);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08);
+  background: white;
+  line-height: 0; // remove gap below img
+}
+
+.template-block-svg {
+  width: 100%;
+  height: auto;
+  display: block;
+  max-height: 480px;
+  object-fit: contain;
+  object-position: top;
+}
+
+.template-block-content-header {
+  font-size: 0.6rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--tt-color-text-default, #374151);
+  opacity: 0.4;
+  padding: 0.75rem 0.75rem 0.1rem;
+  user-select: none;
+}
+
+.template-block-content {
+  padding: 0.25rem 0.75rem 0.75rem;
+
+  > * + * {
+    margin-top: 0.25rem;
   }
 }
